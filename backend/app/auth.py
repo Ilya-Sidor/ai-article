@@ -170,9 +170,16 @@ def _adopt_orphans(user_id):
             add_member(p["id"], user_id, "owner")
 
 
-def _set_cookie(response: Response, token):
+def _secure(request):
+    if os.environ.get("AI_ARTICLE_COOKIE_SECURE", "auto") == "1":
+        return True
+    return request is not None and (request.url.scheme == "https"
+                                    or request.headers.get("x-forwarded-proto") == "https")
+
+
+def _set_cookie(response: Response, token, request=None):
     response.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=SESSION_DAYS * 86400,
-                        secure=os.environ.get("AI_ARTICLE_COOKIE_SECURE", "0") == "1", path="/")
+                        secure=_secure(request), path="/")
 
 
 # ---------------------------------------------------------------------------
@@ -182,25 +189,42 @@ def _set_cookie(response: Response, token):
 class RegisterIn(BaseModel):
     email: str = Field(max_length=320)
     password: str = Field(min_length=MIN_PASSWORD, max_length=200)
+    setup_code: str = ""
+
+
+def setup_code():
+    """One-time code required for the first (administrator) account on a public deployment.
+
+    Set AI_ARTICLE_SETUP_CODE, or AI_ARTICLE_SETUP_CODE_FILE pointing to a file with the code.
+    Without either (local development) the first account needs no code."""
+    code = os.environ.get("AI_ARTICLE_SETUP_CODE", "").strip()
+    path = os.environ.get("AI_ARTICLE_SETUP_CODE_FILE")
+    if not code and path and os.path.exists(path):
+        code = open(path, encoding="utf-8").read().strip()
+    return code
 
 
 @router.post("/register")
-def register(body: RegisterIn, response: Response):
+def register(body: RegisterIn, response: Response, request: Request):
     email = body.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(400, "некорректный e-mail")
-    mode = os.environ.get("AI_ARTICLE_REGISTRATION", "open")
+    mode = os.environ.get("AI_ARTICLE_REGISTRATION", "open")  # open | closed
     with db.engine().begin() as c:
         n = c.execute(select(func.count()).select_from(db.users)).scalar()
         if n and mode == "closed":
             raise HTTPException(403, "регистрация закрыта — обратитесь к администратору")
+        expected = setup_code()
+        if not n and expected and not hmac.compare_digest(body.setup_code.strip(), expected):
+            raise HTTPException(403, detail={"message": "для первой регистрации нужен код установки",
+                                             "setup_required": True})
         if c.execute(select(db.users.c.id).where(db.users.c.email == email)).first():
             raise HTTPException(409, "пользователь с таким e-mail уже есть")
         uid = c.execute(db.users.insert().values(email=email, password_hash=hash_password(body.password),
                                                  is_admin=n == 0, created_at=now())).inserted_primary_key[0]
     if n == 0:
         _adopt_orphans(uid)
-    _set_cookie(response, create_session(uid))
+    _set_cookie(response, create_session(uid), request)
     return _user_public(get_user(uid))
 
 
@@ -211,7 +235,7 @@ class LoginIn(BaseModel):
 
 
 @router.post("/login")
-def login(body: LoginIn, response: Response):
+def login(body: LoginIn, response: Response, request: Request):
     email = body.email.strip().lower()
     with db.engine().connect() as c:
         u = c.execute(select(db.users).where(db.users.c.email == email)).mappings().first()
@@ -237,7 +261,7 @@ def login(body: LoginIn, response: Response):
     with db.engine().begin() as c:
         c.execute(db.users.update().where(db.users.c.id == u["id"]).values(
             failed_logins=0, locked_until=None, totp_last_counter=counter or u["totp_last_counter"]))
-    _set_cookie(response, create_session(u["id"]))
+    _set_cookie(response, create_session(u["id"]), request)
     return _user_public(u)
 
 
@@ -326,5 +350,5 @@ def change_password(body: PasswordIn, request: Request, response: Response):
     with db.engine().begin() as c:
         c.execute(db.users.update().where(db.users.c.id == u["id"]).values(password_hash=hash_password(body.new)))
         c.execute(db.sessions.delete().where(db.sessions.c.user_id == u["id"]))  # log out everywhere
-    _set_cookie(response, create_session(u["id"]))
+    _set_cookie(response, create_session(u["id"]), request)
     return {"ok": True}

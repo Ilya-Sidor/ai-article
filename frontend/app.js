@@ -330,6 +330,11 @@ async function viewData(root, p) {
     el("p", { class: "hint", text: "Прототип принимает .xlsx, .csv, .tsv, .json (строка = случай). Файлы разбираются на сервере; исходник не сохраняется, во внешние сервисы до вашего подтверждения ничего не передаётся." }));
 
   const parts = [];
+  if (!["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {
+    parts.push(el("div", { class: "banner warn" },
+      el("strong", { text: "Вы работаете через публичный адрес. " }),
+      "Трафик проходит через провайдера туннеля, который видит загружаемые файлы до анонимизации. Файлы с персональными данными пациентов загружайте только при локальном доступе (http://localhost) или заранее обезличенными."));
+  }
   if (p.anonymization.status === "confirmed" && !pending.length) {
     parts.push(el("div", { class: "banner ok" },
       el("strong", { text: "Анонимизация подтверждена " }), `${fmtDate(p.anonymization.confirmed_at)}. `,
@@ -803,15 +808,18 @@ function renderLogin(app, register) {
     autocomplete: register ? "new-password" : "current-password" });
   const totp = el("input", { placeholder: "код из приложения (6 цифр)", inputmode: "numeric", autocomplete: "one-time-code" });
   const totpRow = el("label", { class: "field hidden" }, el("span", { text: "Код двухфакторной аутентификации" }), totp);
+  const setup = el("input", { placeholder: "код установки" });
+  const setupRow = el("label", { class: "field hidden" }, el("span", { text: "Код установки (для первой учётной записи)" }), setup);
   const submit = el("button", { class: "primary", type: "submit", text: register ? "Зарегистрироваться" : "Войти" });
   const form = el("form", { class: "card stack", style: "max-width:420px;margin:40px auto", onsubmit: async (e) => {
     e.preventDefault();
     await busy(submit, async () => {
       try {
         state.user = await rawApi(register ? "/auth/register" : "/auth/login",
-          { json: register ? { email: email.value, password: password.value } : { email: email.value, password: password.value, totp: totp.value } });
+          { json: register ? { email: email.value, password: password.value, setup_code: setup.value } : { email: email.value, password: password.value, totp: totp.value } });
       } catch (err) {
         if (err.detail && err.detail.mfa_required) { totpRow.classList.remove("hidden"); totp.focus(); toast(err.detail.message); return; }
+        if (err.detail && err.detail.setup_required) { setupRow.classList.remove("hidden"); setup.focus(); toast(err.detail.message); return; }
         throw err;
       }
       await loadMeta();
@@ -822,7 +830,7 @@ function renderLogin(app, register) {
     el("h1", { text: register ? "Регистрация" : "Вход" }),
     el("label", { class: "field" }, el("span", { text: "E-mail" }), email),
     el("label", { class: "field" }, el("span", { text: "Пароль" }), password),
-    totpRow, submit,
+    totpRow, setupRow, submit,
     el("p", { class: "small" }, register ? el("a", { href: "#/login", text: "Уже есть аккаунт — войти" }) : el("a", { href: "#/register", text: "Создать аккаунт" })),
     el("p", { class: "hint small", text: "Данные проектов хранятся зашифрованными (AES-256); каждый пользователь видит только свои проекты." }));
   app.replaceChildren(form);

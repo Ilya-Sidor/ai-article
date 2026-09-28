@@ -229,3 +229,32 @@ def test_http_sandbox_roundtrip(api, monkeypatch):
     pid = _project_with_data(api)
     res = api.post(f"/api/projects/{pid}/analysis/run").json()
     assert res["summary"]["n"] == 24 and res["findings"]
+
+
+def test_first_account_requires_setup_code_when_configured(data_dir, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+    monkeypatch.setenv("AI_ARTICLE_SETUP_CODE", "setup-123456")
+    c = TestClient(main.app, headers={"x-aia": "1"})
+    body = {"email": "admin@example.org", "password": "a long enough password"}
+    r = c.post("/api/auth/register", json=body)
+    assert r.status_code == 403 and r.json()["detail"]["setup_required"]
+    assert c.post("/api/auth/register", json=dict(body, setup_code="wrong")).status_code == 403
+    assert c.post("/api/auth/register", json=dict(body, setup_code="setup-123456")).json()["is_admin"]
+    monkeypatch.setenv("AI_ARTICLE_REGISTRATION", "closed")
+    other = TestClient(main.app, headers={"x-aia": "1"})
+    assert other.post("/api/auth/register", json={"email": "x@example.org", "password": "a long enough password",
+                                                  "setup_code": "setup-123456"}).status_code == 403
+
+
+def test_secure_cookie_behind_https_proxy(data_dir):
+    from fastapi.testclient import TestClient
+
+    from app import main
+    c = TestClient(main.app, headers={"x-aia": "1", "x-forwarded-proto": "https"})
+    r = c.post("/api/auth/register", json={"email": "p@example.org", "password": "a long enough password"})
+    assert "secure" in r.headers["set-cookie"].lower()
+    local = TestClient(main.app, headers={"x-aia": "1"})
+    r = local.post("/api/auth/register", json={"email": "q@example.org", "password": "a long enough password"})
+    assert "secure" not in r.headers["set-cookie"].lower()
