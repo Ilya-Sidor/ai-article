@@ -285,7 +285,7 @@ def generate_plan(pid: str):
     for item in state["tables"] + state["figures"]:
         item["include"] = item["id"] in chosen or item["id"] == "t1"
     state["plan"] = {"key_messages": out["key_messages"], "sections": out["sections"], "rationale": out["rationale"],
-                     "status": "draft", "created_at": now_iso(), "model": llm.effective_model(llm.MODEL_REASONING),
+                     "status": "draft", "created_at": now_iso(), "model": llm.used_model(llm.effective_model(llm.MODEL_REASONING)),
                      "unknown_assets": sorted(chosen - ids)}
     ms.save(store, pid, state)
     store.audit(pid, "agent", "manuscript.plan_generated", {"sections": len(out["sections"])})
@@ -375,6 +375,7 @@ def _apply_new_citations(pid, project, key, out):
     chunks = lit.chunks_by_id(store, pid)
     text = out["text"]
     report = []
+    grounded = []
     for c in out.get("new_citations", []):
         k = c["marker"].split(":")[-1].strip()
         chunk = chunks.get(c["chunk_id"])
@@ -384,15 +385,15 @@ def _apply_new_citations(pid, project, key, out):
             report.append({"marker": c["marker"], "status": "rejected",
                            "reason": "фрагмента нет в базе" if chunk is None else "цитата не найдена во фрагменте"})
             continue
-        try:
-            verification = lit_agent.verify_citation(project, c["claim"], chunk, c["quote"])
-        except llm.LLMUnavailable as exc:
-            verification = {"status": "unverified", "rationale": str(exc)}
+        report.append(None)  # filled after the batch verification, keeps the order of markers
+        grounded.append((c, chunk, marker, len(report) - 1))
+    checks = lit_agent.verify_citations(project, [(c["claim"], chunk, c["quote"]) for c, chunk, _, _ in grounded])
+    for (c, chunk, marker, slot), verification in zip(grounded, checks):
         cit = lit.add_citation(store, pid, c["claim"], {"type": "section", "key": key}, chunk, c["quote"],
                                "supports", "agent", verification)
         text = marker.sub(f"[[{cit['id']}]]", text)
-        report.append({"marker": c["marker"], "status": "added", "citation": cit["id"],
-                       "verification": verification["status"]})
+        report[slot] = {"marker": c["marker"], "status": "added", "citation": cit["id"],
+                        "verification": verification["status"]}
     text = agent.NEW_MARKER.sub("[уточнить: источник для этого утверждения]", text)
     return text, report
 

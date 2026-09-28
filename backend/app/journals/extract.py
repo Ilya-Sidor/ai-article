@@ -65,7 +65,7 @@ def extract_profile(profile, texts: dict):
     pseudo_project = {"id": f"journal:{profile['id']}", "anonymization": {"status": "confirmed"}}
     out = llm._call(pseudo_project, "extract_journal_profile", MODEL_EXTRACTION, SYSTEM, user, schema,
                     max_tokens=32000, gate=False, output_config={"effort": "medium"})
-    meta = {"model": llm.effective_model(MODEL_EXTRACTION), "created_at": now_iso(),
+    meta = {"model": llm.used_model(llm.effective_model(MODEL_EXTRACTION)), "created_at": now_iso(),
             "n_returned": len(out["fields"]), "truncated": size >= MAX, "sources": list(texts)}
     return out["fields"], meta
 

@@ -53,6 +53,10 @@ class Claude:
             return self._r({"titles": ["Title A", "Title B", "Title C"], "running_title": "Run",
                             "keywords": ["GIST", "PDGFRA", "KIT", "CD117"], "highlights": ["H1", "H2", "H3"]})
         if "check citations" in system:
+            items = json.loads(user)
+            if isinstance(items, list):
+                return self._r({"results": [{"index": it["index"], "verdict": "supported", "rationale": "ok"}
+                                            for it in items]})
             return self._r({"verdict": "supported", "rationale": "ok"})
         if "Revise the section" in user:
             return self._r({"text": "Revised text without numbers.", "new_citations": [], "questions": []})
@@ -220,7 +224,8 @@ def test_new_citations_are_checked(api, project, monkeypatch):
     added = []
     monkeypatch.setattr(lit, "add_citation", lambda *a, **k: added.append(a) or {"id": "CIT-0042"})
     from app.literature import agent as lit_agent
-    monkeypatch.setattr(lit_agent, "verify_citation", lambda *a: {"status": "supported", "rationale": ""})
+    monkeypatch.setattr(lit_agent, "verify_citations",
+                        lambda project, items: [{"status": "supported", "rationale": ""} for _ in items])
     out = {"text": "Loss of CD117 is described [[NEW:1]] and also [[NEW:2]] and [[NEW:3]].",
            "new_citations": [
                {"marker": "NEW:1", "chunk_id": "S-001:001", "quote": "CD117 was negative in 9 of 20", "claim": "c"},

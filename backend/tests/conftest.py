@@ -14,7 +14,8 @@ TEST_DB = os.environ.get("AIA_TEST_DATABASE_URL")
 
 @pytest.fixture()
 def data_dir(tmp_path, monkeypatch):
-    from app import config, crypto, db, storage
+    from app import config, crypto, db, llm, storage
+    llm._exhausted.clear()
     monkeypatch.setenv("AI_ARTICLE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("AI_ARTICLE_KEY_FILE", str(tmp_path / "keys" / "master.key"))
     monkeypatch.delenv("AI_ARTICLE_MASTER_KEY", raising=False)

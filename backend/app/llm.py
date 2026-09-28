@@ -18,6 +18,7 @@ Rules enforced here:
 import json
 import os
 import re
+import threading
 
 import anthropic
 import httpx
@@ -99,7 +100,7 @@ def status():
         if not gemini_key():
             return {**base, "available": False,
                     "reason": "не задан ключ Google Gemini API — администратор вводит его в разделе «Аккаунт → ИИ-модели»"}
-        return {**base, "available": True}
+        return {**base, "available": True, "exhausted": exhausted_models()}
     if provider() == "ollama":
         m = ollama_model()
         base = {"provider": "ollama", "reasoning_model": m, "extraction_model": m, "local": True}
@@ -212,6 +213,11 @@ def _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate
 
 
 _gemini = {}
+_local = threading.local()
+# Free-tier quotas are per model; when one is exhausted the next model in capability order is used.
+GEMINI_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-pro",
+                "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
+_exhausted = {}  # model -> (reset_at_utc, message)
 
 
 def gemini_client(key):
@@ -222,77 +228,141 @@ def gemini_client(key):
     return _gemini[key]
 
 
+def used_model(default):
+    """The model that actually answered the last request in this thread (fallbacks included)."""
+    return getattr(_local, "model", None) or default
+
+
+def _next_quota_reset():
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    pt = datetime.now(ZoneInfo("America/Los_Angeles"))
+    return (pt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).astimezone(ZoneInfo("UTC"))
+
+
+def exhausted_models():
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    for m in [m for m, (until, _) in _exhausted.items() if until <= now]:
+        _exhausted.pop(m, None)
+    return {m: {"until": until.isoformat(timespec="minutes"), "message": msg} for m, (until, msg) in _exhausted.items()}
+
+
+def _classify(exc):
+    """(kind, status, message) for errors of both google-genai API generations, by duck typing."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    msg = str(exc)
+    if isinstance(status, int):
+        if status == 429:
+            return ("daily" if re.search(r"per ?day|daily|RequestsPerDay", msg, re.I) else "rate"), status, msg
+        if status in (401, 403):
+            return "auth", status, msg
+        if status == 400 and "schema" in msg.lower():
+            return "schema", status, msg
+        if status == 404:
+            return "model", status, msg
+        return "status", status, msg
+    name = type(exc).__name__.lower()
+    if "connection" in name or "timeout" in name or isinstance(exc, (httpx.HTTPError, OSError)):
+        return "connection", None, msg
+    return "unknown", None, f"{type(exc).__name__}: {msg}"
+
+
 def _retry_delay(exc, attempt):
+    body = getattr(exc, "details", None) or getattr(exc, "body", None) or {}
     try:
-        for d in (exc.details or {}).get("error", {}).get("details", []):
+        for d in (body.get("error", {}) if isinstance(body, dict) else {}).get("details", []) or []:
             if "retryDelay" in d:
                 return min(float(str(d["retryDelay"]).rstrip("s")), 90.0)
     except (AttributeError, TypeError, ValueError):
         pass
-    return min(10.0 * 2 ** attempt, 90.0)
+    return min(10.0 * 2 ** attempt, 60.0)
+
+
+def _gemini_chain(model):
+    reasoning, extraction = gemini_models()
+    first = reasoning if model == MODEL_REASONING else extraction
+    tail = [m for m in GEMINI_CHAIN if m != first]
+    if first in GEMINI_CHAIN:
+        tail = GEMINI_CHAIN[GEMINI_CHAIN.index(first) + 1:]
+    return [first] + tail
 
 
 def _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
-    """Structured request to Gemini (Interactions API, JSON-schema response format)."""
-    import time
+    """Structured request to Gemini (Interactions API, JSON-schema response format).
 
-    from google.genai import errors
+    Per-minute limits are retried; an exhausted daily quota moves the request to the next
+    model of the chain (the model that answered is recorded in the log and in used_model())."""
+    import time
     if gate:
         _gate(project)
     key = gemini_key()
     if not key:
         raise LLMUnavailable("не задан ключ Google Gemini API")
-    m = effective_model(model)
-    _log(project["id"], purpose, m, system + user)
-    body = {
-        "model": m, "system_instruction": system, "input": user,
-        "response_format": {"type": "text", "mime_type": "application/json", "schema": schema},
-        "generation_config": {"max_output_tokens": min(max_tokens, 65536),
-                              "thinking_level": "high" if model == MODEL_REASONING else "low"},
-    }
-    for attempt in range(4):
-        try:
-            interaction = gemini_client(key).interactions.create(**body, timeout=900)
-            break
-        except errors.APIError as exc:
-            text = str(exc)
-            daily = bool(re.search(r"per ?day|daily", text, re.I))
-            if exc.code == 429 and not daily and attempt < 3:
-                time.sleep(_retry_delay(exc, attempt))
-                continue
-            if exc.code == 429:
-                raise LLMUnavailable("исчерпан " + ("дневной " if daily else "") +
-                                     "лимит бесплатного тарифа Gemini — повторите позже") from exc
-            if exc.code in (401, 403):
-                raise LLMUnavailable("Gemini API отклонил ключ — проверьте его в настройках") from exc
-            if exc.code == 400 and "schema" in text.lower() and "schema" in body["response_format"]:
-                body["response_format"] = {"type": "text", "mime_type": "application/json"}  # validated below
-                body["system_instruction"] = system + "\n\nReturn only JSON matching this schema:\n" + json.dumps(
-                    schema, ensure_ascii=False)
-                continue
-            raise LLMUnavailable(f"Gemini API вернул ошибку {exc.code}") from exc
-        except Exception as exc:  # network errors
-            raise LLMUnavailable("нет соединения с Gemini API") from exc
-    else:
-        raise LLMUnavailable("Gemini API: превышен лимит запросов, повторите позже")
-    text = getattr(interaction, "output_text", None) or ""
-    try:
-        return json.loads(text)
-    except ValueError as exc:
-        raise LLMUnavailable("Gemini вернул некорректный JSON") from exc
+    _local.model = None
+    base_system = system
+    response_format = {"type": "text", "mime_type": "application/json", "schema": schema}
+    last_daily = None
+    for m in _gemini_chain(model):
+        if m in exhausted_models():
+            continue
+        body = {"model": m, "system_instruction": system, "input": user, "response_format": response_format,
+                "generation_config": {"max_output_tokens": min(max_tokens, 65536),
+                                      "thinking_level": "high" if model == MODEL_REASONING else "low"}}
+        attempt = 0
+        while True:
+            try:
+                interaction = gemini_client(key).interactions.create(**body, timeout=900)
+            except Exception as exc:
+                kind, status, msg = _classify(exc)
+                if kind == "rate" and attempt < 3:
+                    time.sleep(_retry_delay(exc, attempt))
+                    attempt += 1
+                    continue
+                if kind in ("daily", "rate", "model"):
+                    if kind == "daily":
+                        _exhausted[m] = (_next_quota_reset(), msg[:300])
+                        last_daily = msg
+                    break  # try the next model
+                if kind == "schema" and "schema" in response_format:
+                    response_format = {"type": "text", "mime_type": "application/json"}  # validated below
+                    system = base_system + "\n\nReturn only JSON matching this schema:\n" + json.dumps(
+                        schema, ensure_ascii=False)
+                    body.update(response_format=response_format, system_instruction=system)
+                    continue
+                if kind == "auth":
+                    raise LLMUnavailable("Gemini API отклонил ключ — проверьте его в «Аккаунт → ИИ-модели»") from exc
+                if kind == "connection":
+                    raise LLMUnavailable("нет соединения с Gemini API — проверьте интернет/VPN") from exc
+                raise LLMUnavailable(f"ошибка Gemini API ({status or 'нет кода'}): {msg[:200]}") from exc
+            _log(project["id"], purpose, m, base_system + user)
+            _local.model = m
+            text = getattr(interaction, "output_text", None) or ""
+            try:
+                return json.loads(text)
+            except ValueError as exc:
+                raise LLMUnavailable("Gemini вернул некорректный JSON") from exc
+    if last_daily or exhausted_models():
+        raise LLMUnavailable("исчерпаны дневные лимиты бесплатного тарифа Gemini для всех доступных моделей — "
+                             "лимиты обновятся в полночь по тихоокеанскому времени (10:00 МСК)")
+    raise LLMUnavailable("Gemini API: превышен лимит запросов в минуту, повторите через минуту")
 
 
 def _call(project, purpose, model, system, user, schema, max_tokens, gate=True, **extra):
+    _local.model = None
     if provider() == "gemini":
         return _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate)
     if provider() == "ollama":
-        return _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate)
+        out = _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate)
+        _local.model = ollama_model()
+        return out
     response = request(
         project, purpose, model, gate=gate, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}],
         output_config={"format": {"type": "json_schema", "schema": schema}, **extra.pop("output_config", {})},
         **extra,
     )
+    _local.model = model
     return final_json(response)
 
 
@@ -379,7 +449,7 @@ def interpret_finding(project: dict, finding: dict, context: dict) -> dict:
                    INTERPRETATION_SCHEMA, max_tokens=16000, output_config={"effort": "medium"},
                    betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     result["unverified_numbers"] = unverified_numbers(result, payload)
-    result["model"] = effective_model(MODEL_REASONING)
+    result["model"] = used_model(effective_model(MODEL_REASONING))
     result["created_at"] = now_iso()
     return result
 

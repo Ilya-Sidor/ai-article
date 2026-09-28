@@ -76,16 +76,52 @@ def test_structured_call_and_thinking_levels(api, gemini):
     assert t["ok"] and gemini.calls[-1]["generation_config"]["thinking_level"] == "high"
 
 
-def test_rate_limit_retry_and_daily_quota(api, gemini):
+class NextGenRateLimit(Exception):
+    """Shape of google.genai._gaos RateLimitError (the Interactions API): status_code, no .code."""
+
+    def __init__(self, msg):
+        super().__init__(f"Error code: 429 - {{'error': {{'message': '{msg}'}}}}")
+        self.status_code = 429
+
+
+def test_rate_limit_retry_and_model_fallback(api, gemini):
     from app import llm
     project = {"id": "p", "anonymization": {"status": "confirmed"}}
     schema = {"type": "object"}
     gemini.replies = [_quota(delay="3s"), _quota(), {"ok": 1}]
     assert llm._call(project, "x", llm.MODEL_REASONING, "s", "u", schema, 100) == {"ok": 1}
-    assert len(gemini.calls) == 3
-    gemini.replies = [_quota("Quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier")]
-    with pytest.raises(llm.LLMUnavailable, match="дневной"):
+    assert len(gemini.calls) == 3 and llm.used_model("?") == "gemini-3.8-flash"
+
+    # the real error from the user's session: daily quota of the strongest model, new SDK error class
+    daily = NextGenRateLimit("Rate limit exceeded for model gemini-3.8-flash (limit: 20 requests per day on Free Tier)")
+    gemini.calls.clear()
+    gemini.replies = [daily, {"ok": 2}]
+    assert llm._call(project, "x", llm.MODEL_REASONING, "s", "u", schema, 100) == {"ok": 2}
+    assert [c["model"] for c in gemini.calls] == ["gemini-3.8-flash", "gemini-3.7-flash"]
+    assert llm.used_model("?") == "gemini-3.7-flash" and "gemini-3.8-flash" in llm.exhausted_models()
+    assert llm.usage("p")[-1]["model"] == "gemini-3.7-flash"  # the log names the model that answered
+    gemini.calls.clear()
+    gemini.replies = [{"ok": 3}]  # exhausted model is skipped until the quota resets
+    llm._call(project, "x", llm.MODEL_REASONING, "s", "u", schema, 100)
+    assert gemini.calls[0]["model"] == "gemini-3.7-flash"
+    assert "gemini-3.8-flash" in api.get("/api/meta").json()["llm"]["exhausted"]
+
+    gemini.replies = [NextGenRateLimit("limit: 20 requests per day") for _ in llm.GEMINI_CHAIN]
+    with pytest.raises(llm.LLMUnavailable, match="дневные лимиты"):
         llm._call(project, "x", llm.MODEL_REASONING, "s", "u", schema, 100)
+
+
+def test_connection_and_unknown_errors_are_not_confused(api, gemini):
+    import httpx
+
+    from app import llm
+    project = {"id": "p", "anonymization": {"status": "confirmed"}}
+    gemini.replies = [httpx.ConnectError("boom")]
+    with pytest.raises(llm.LLMUnavailable, match="нет соединения"):
+        llm._call(project, "x", "m", "s", "u", {}, 10)
+    gemini.replies = [ValueError("strange")]
+    with pytest.raises(llm.LLMUnavailable, match="ValueError"):
+        llm._call(project, "x", "m", "s", "u", {}, 10)
 
 
 def test_bad_key_and_gate(api, gemini):

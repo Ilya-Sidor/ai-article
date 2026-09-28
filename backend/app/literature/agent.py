@@ -123,8 +123,46 @@ def verify_citation(project, claim, chunk, quote):
     out = llm._call(project, "verify_citation", MODEL_EXTRACTION, VERIFY_SYSTEM, user, VERIFY_SCHEMA,
                     max_tokens=2000, gate=False, output_config={"effort": "low"})
     status = {"supported": "supported", "partial": "partial", "not_supported": "not_supported"}[out["verdict"]]
-    return {"status": status, "rationale": out["rationale"], "model": llm.effective_model(MODEL_EXTRACTION),
+    return {"status": status, "rationale": out["rationale"], "model": llm.used_model(llm.effective_model(MODEL_EXTRACTION)),
             "ts": now_iso()}
+
+
+BATCH_VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {"results": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"index": {"type": "integer"},
+                       "verdict": {"type": "string", "enum": ["supported", "partial", "not_supported"]},
+                       "rationale": {"type": "string"}},
+        "required": ["index", "verdict", "rationale"], "additionalProperties": False}}},
+    "required": ["results"], "additionalProperties": False,
+}
+
+
+def verify_citations(project, items):
+    """Independent check of several citations in one request (saves free-tier quota).
+
+    items: [(claim, chunk, quote)] → list of verification dicts in the same order."""
+    if not items:
+        return []
+    payload = [{"index": i, "claim": claim, "quote": quote, "fragment": chunk["text"],
+                "fragment_location": {"page": chunk.get("page"), "section": chunk.get("section")}}
+               for i, (claim, chunk, quote) in enumerate(items)]
+    try:
+        out = llm._call(project, "verify_citation", MODEL_EXTRACTION,
+                        VERIFY_SYSTEM + "\nJudge every numbered item separately and return one result per index.",
+                        json.dumps(payload, ensure_ascii=False), BATCH_VERIFY_SCHEMA, max_tokens=8000, gate=False,
+                        output_config={"effort": "low"})
+    except llm.LLMUnavailable as exc:
+        return [{"status": "unverified", "rationale": str(exc)} for _ in items]
+    model = llm.used_model(llm.effective_model(MODEL_EXTRACTION))
+    by_index = {r["index"]: r for r in out.get("results", [])}
+    results = []
+    for i in range(len(items)):
+        r = by_index.get(i)
+        results.append({"status": r["verdict"], "rationale": r["rationale"], "model": model, "ts": now_iso()} if r
+                       else {"status": "unverified", "rationale": "модель не вернула оценку для этой цитаты"})
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +230,7 @@ def extract_source(project, source, chunks):
             item["grounded"] = False
             item["issue"] = item.pop("reason")
         out[key] = ok + rejected
-    out.update({"model": llm.effective_model(MODEL_EXTRACTION), "created_at": now_iso(),
+    out.update({"model": llm.used_model(llm.effective_model(MODEL_EXTRACTION)), "created_at": now_iso(),
                 "truncated": len(parts) < len(chunks)})
     return out
 
@@ -243,7 +281,7 @@ def compare_finding(project, finding, search_fn, chunks_lookup):
     out, queries = _run_with_search(project, "compare_finding", COMPARE_SYSTEM, user, COMPARE_SCHEMA, search_fn,
                                     gate=True)
     ok, rejected = check_evidence(out["evidence"], chunks_lookup)
-    out.update({"evidence": ok, "rejected": rejected, "queries": queries, "model": llm.effective_model(MODEL_REASONING),
+    out.update({"evidence": ok, "rejected": rejected, "queries": queries, "model": llm.used_model(llm.effective_model(MODEL_REASONING)),
                 "created_at": now_iso()})
     return out
 
@@ -295,5 +333,5 @@ def ground_text(project, text, search_fn, chunks_lookup):
         if status == "cited" and not ok:
             status = "needs_source"
         result.append({"index": i, "text": sent, "status": status, "evidence": ok, "rejected": rejected})
-    return {"sentences": result, "queries": queries, "model": llm.effective_model(MODEL_REASONING),
+    return {"sentences": result, "queries": queries, "model": llm.used_model(llm.effective_model(MODEL_REASONING)),
             "created_at": now_iso()}

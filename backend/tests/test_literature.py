@@ -272,6 +272,11 @@ class FakeClaude:
     def respond(self, kw):
         system = kw.get("system", "")
         if "check citations" in system:
+            items = json.loads(kw["messages"][0]["content"])
+            if isinstance(items, list):  # batch verification
+                return self._msg("end_turn", [self._text({"results": [
+                    {"index": it["index"], "verdict": "supported", "rationale": "фрагмент подтверждает"}
+                    for it in items]})])
             return self._msg("end_turn", [self._text({"verdict": "supported", "rationale": "фрагмент подтверждает"})])
         if kw.get("tools"):
             if len(kw["messages"]) == 1:

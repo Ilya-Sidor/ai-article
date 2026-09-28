@@ -253,14 +253,11 @@ def compare(pid: str, fid: str):
                     and c["decision"] == "pending")]
     lit.save_citations(store, pid, kept)
     cids = []
-    for e in result["evidence"]:
-        chunk = chunks[e["chunk_id"]]
-        try:
-            verification = agent.verify_citation(project, e["note"], chunk, e["quote"])
-        except llm.LLMUnavailable as exc:
-            verification = {"status": "unverified", "rationale": str(exc)}
-        cit = lit.add_citation(store, pid, e["note"], {"type": "finding", "key": f["key"]}, chunk, e["quote"],
-                               e["relation"], "agent", verification)
+    checks = agent.verify_citations(project, [(e["note"], chunks[e["chunk_id"]], e["quote"])
+                                              for e in result["evidence"]])
+    for e, verification in zip(result["evidence"], checks):
+        cit = lit.add_citation(store, pid, e["note"], {"type": "finding", "key": f["key"]}, chunks[e["chunk_id"]],
+                               e["quote"], e["relation"], "agent", verification)
         cids.append(cit["id"])
     sources_hit = {chunks[e["chunk_id"]]["source_id"] for e in result["evidence"] if e["relation"] != "context"}
     comps = _comparisons(pid)
@@ -406,16 +403,13 @@ def ground(pid: str, body: GroundIn):
     docs = _groundings(pid)
     gid = "T-%03d" % (len(docs) + 1)
     sentences = []
+    pairs = [(s, e) for s in result["sentences"] for e in s["evidence"]]
+    checks = iter(agent.verify_citations(project, [(s["text"], chunks[e["chunk_id"]], e["quote"]) for s, e in pairs]))
     for s in result["sentences"]:
         cids = []
         for e in s["evidence"]:
-            chunk = chunks[e["chunk_id"]]
-            try:
-                verification = agent.verify_citation(project, s["text"], chunk, e["quote"])
-            except llm.LLMUnavailable as exc:
-                verification = {"status": "unverified", "rationale": str(exc)}
-            cit = lit.add_citation(store, pid, s["text"], {"type": "text", "grounding_id": gid}, chunk, e["quote"],
-                                   "supports", "agent", verification)
+            cit = lit.add_citation(store, pid, s["text"], {"type": "text", "grounding_id": gid},
+                                   chunks[e["chunk_id"]], e["quote"], "supports", "agent", next(checks))
             cids.append(cit["id"])
         sentences.append({"index": s["index"], "text": s["text"], "status": s["status"], "citation_ids": cids,
                           "rejected": s["rejected"]})
