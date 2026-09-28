@@ -47,6 +47,48 @@ def gemini_key():
     return settings.get_secret("llm.gemini_api_key", "GEMINI_API_KEY")
 
 
+def openrouter_key():
+    from . import settings
+    return settings.get_secret("llm.openrouter_api_key", "OPENROUTER_API_KEY")
+
+
+# Default free chains ("provider:model"), strongest first. The order is a judgement call and is
+# editable by the administrator; extraction starts lower to save the strongest models' quota.
+DEFAULT_CHAIN_REASONING = [
+    "gemini:gemini-3.8-flash", "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free", "gemini:gemini-3.7-flash",
+    "openrouter:nvidia/nemotron-3-super-120b-a12b:free", "gemini:gemini-3.6-flash", "openrouter:qwen/qwen3.8-27b:free",
+    "gemini:gemini-3.5-flash", "gemini:gemini-2.5-pro", "openrouter:openrouter/free", "gemini:gemini-2.5-flash",
+]
+DEFAULT_CHAIN_EXTRACTION = [
+    "openrouter:nvidia/nemotron-3-super-120b-a12b:free", "gemini:gemini-3.5-flash", "openrouter:qwen/qwen3.8-27b:free",
+    "gemini:gemini-2.5-flash", "openrouter:dots-studio/dots-3-note-preview:free", "gemini:gemini-3.5-flash-lite",
+    "openrouter:openrouter/free", "gemini:gemini-3.1-flash-lite", "gemini:gemini-2.5-flash-lite",
+]
+
+
+def chains():
+    from . import settings
+
+    def parse(key, default):
+        raw = settings.get(key)
+        items = [x.strip() for x in raw.splitlines() if x.strip()] if raw else list(default)
+        return [x for x in items if x.split(":", 1)[0] in ("gemini", "openrouter")]
+    return parse("llm.chain_reasoning", DEFAULT_CHAIN_REASONING), parse("llm.chain_extraction", DEFAULT_CHAIN_EXTRACTION)
+
+
+def _chain_for(model):
+    """Ordered entries for a request; depends on the provider mode."""
+    p = provider()
+    if p == "gemini":
+        return ["gemini:" + m for m in _gemini_chain(model)]
+    reasoning, extraction = chains()
+    entries = reasoning if model == MODEL_REASONING else extraction
+    if p == "openrouter":
+        entries = [e for e in entries if e.startswith("openrouter:")]
+    have = {"gemini": bool(gemini_key()), "openrouter": bool(openrouter_key())}
+    return [e for e in entries if have[e.split(":", 1)[0]]]
+
+
 def ollama_url():
     return os.environ.get("AI_ARTICLE_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 
@@ -62,6 +104,9 @@ def effective_model(model):
     if p == "gemini":
         reasoning, extraction = gemini_models()
         return reasoning if model == MODEL_REASONING else extraction
+    if p in ("free", "openrouter"):
+        entries = [e for e in _chain_for(model) if e not in exhausted_models()] or _chain_for(model)
+        return entries[0].split(":", 1)[1] if entries else model
     return model
 
 
@@ -69,6 +114,8 @@ def context_budget_chars():
     """How much source text (papers, guidelines) one request may carry."""
     if provider() == "ollama":
         return int(os.environ.get("AI_ARTICLE_OLLAMA_MAX_CHARS", "60000"))
+    if provider() in ("free", "openrouter"):
+        return 240_000  # chain may fall back to 128–262k-token models
     return 400_000  # Claude and Gemini: 1M-token context
 
 
@@ -94,6 +141,14 @@ def client():
 
 
 def status():
+    if provider() in ("free", "openrouter"):
+        r, e = effective_model(MODEL_REASONING), effective_model(MODEL_EXTRACTION)
+        base = {"provider": provider(), "reasoning_model": r, "extraction_model": e, "local": False,
+                "keys": {"gemini": bool(gemini_key()), "openrouter": bool(openrouter_key())}}
+        if not (_chain_for(MODEL_REASONING) or _chain_for(MODEL_EXTRACTION)):
+            return {**base, "available": False,
+                    "reason": "не заданы ключи Gemini/OpenRouter — администратор вводит их в «Аккаунт → ИИ-модели»"}
+        return {**base, "available": True, "exhausted": exhausted_models()}
     if provider() == "gemini":
         reasoning, extraction = gemini_models()
         base = {"provider": "gemini", "reasoning_model": reasoning, "extraction_model": extraction, "local": False}
@@ -214,10 +269,21 @@ def _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate
 
 _gemini = {}
 _local = threading.local()
-# Free-tier quotas are per model; when one is exhausted the next model in capability order is used.
+# Free-tier quotas are per model on Gemini and per account on OpenRouter; when one is exhausted
+# the next entry of the chain answers. Gemini-only mode walks this list from the configured model.
 GEMINI_CHAIN = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-pro",
                 "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite"]
-_exhausted = {}  # model -> (reset_at_utc, message)
+_exhausted = {}  # "provider:model" or "openrouter:*" -> (until_utc, message)
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+_or_caps = {"ts": 0, "caps": {}}
+
+
+class _Skip(Exception):
+    """This model cannot answer now; try the next entry of the chain."""
+
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
 
 
 def gemini_client(key):
@@ -240,12 +306,28 @@ def _next_quota_reset():
     return (pt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).astimezone(ZoneInfo("UTC"))
 
 
+def _block(entry, message, minutes=None):
+    from datetime import datetime, timedelta, timezone
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else _next_quota_reset()
+    _exhausted[entry] = (until, message[:300])
+
+
 def exhausted_models():
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     for m in [m for m, (until, _) in _exhausted.items() if until <= now]:
         _exhausted.pop(m, None)
-    return {m: {"until": until.isoformat(timespec="minutes"), "message": msg} for m, (until, msg) in _exhausted.items()}
+    out = {}
+    for m, (until, msg) in _exhausted.items():
+        out[m.split(":", 1)[1] if m.startswith("gemini:") else m] = {"until": until.isoformat(timespec="minutes"),
+                                                                     "message": msg}
+        out[m] = out[m.split(":", 1)[1] if m.startswith("gemini:") else m]
+    return out
+
+
+def _is_blocked(entry):
+    ex = exhausted_models()
+    return entry in ex or (entry.startswith("openrouter:") and "openrouter:*" in ex)
 
 
 def _classify(exc):
@@ -288,70 +370,177 @@ def _gemini_chain(model):
     return [first] + tail
 
 
-def _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
-    """Structured request to Gemini (Interactions API, JSON-schema response format).
+def _json_prompt(system, schema):
+    return system + "\n\nReturn only a JSON object (no prose, no code fences) matching this JSON schema:\n" + \
+        json.dumps(schema, ensure_ascii=False)
 
-    Per-minute limits are retried; an exhausted daily quota moves the request to the next
-    model of the chain (the model that answered is recorded in the log and in used_model())."""
+
+def _parse_json(text):
+    t = (text or "").strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t)
+    try:
+        return json.loads(t)
+    except ValueError:
+        m = re.search(r"\{.*\}", t, re.S)
+        if m:
+            return json.loads(m.group(0))
+        raise
+
+
+def _gemini_once(entry, model_id, system, user, schema, max_tokens, reasoning):
     import time
+    key = gemini_key()
+    response_format = {"type": "text", "mime_type": "application/json", "schema": schema}
+    body = {"model": model_id, "system_instruction": system, "input": user, "response_format": response_format,
+            "generation_config": {"max_output_tokens": min(max_tokens, 65536),
+                                  "thinking_level": "high" if reasoning else "low"}}
+    attempt = 0
+    while True:
+        try:
+            interaction = gemini_client(key).interactions.create(**body, timeout=900)
+            break
+        except Exception as exc:
+            kind, status, msg = _classify(exc)
+            if kind == "rate" and attempt < 3:
+                time.sleep(_retry_delay(exc, attempt))
+                attempt += 1
+                continue
+            if kind == "daily":
+                _block(entry, msg)
+            if kind == "schema" and "schema" in body["response_format"]:
+                body.update(response_format={"type": "text", "mime_type": "application/json"},
+                            system_instruction=_json_prompt(system, schema))
+                continue
+            if kind == "auth":
+                _block("gemini:" + model_id, "ключ Gemini отклонён", minutes=10)
+                raise _Skip("auth", "Gemini API отклонил ключ") from exc
+            if kind == "connection":
+                raise _Skip("connection", "нет соединения с Gemini API — проверьте интернет/VPN") from exc
+            if kind in ("daily", "rate", "model", "status"):
+                raise _Skip(kind, msg) from exc
+            raise _Skip("unknown", f"ошибка Gemini API: {msg[:200]}") from exc
+    try:
+        return _parse_json(getattr(interaction, "output_text", None) or "")
+    except ValueError as exc:
+        raise _Skip("invalid", "Gemini вернул некорректный JSON") from exc
+
+
+def _openrouter_caps():
+    """model id -> set of supported parameters, from the public catalogue (cached for a day)."""
+    import time
+    if time.time() - _or_caps["ts"] > 86400 or not _or_caps["caps"]:
+        try:
+            data = _http_get(f"{OPENROUTER_URL}/models").json().get("data", [])
+            _or_caps["caps"] = {m["id"]: set(m.get("supported_parameters") or []) for m in data}
+            _or_caps["ts"] = time.time()
+        except Exception:
+            _or_caps["ts"] = time.time() - 86400 + 300  # retry in 5 minutes
+    return _or_caps["caps"]
+
+
+def _or_post(url, body, headers, timeout):
+    """Single HTTP entry point for OpenRouter (patched in tests)."""
+    return httpx.post(url, json=body, headers=headers, timeout=timeout)
+
+
+def _openrouter_once(entry, model_id, system, user, schema, max_tokens, reasoning):
+    import time
+    caps = _openrouter_caps().get(model_id, set())
+    structured = "structured_outputs" in caps
+    body = {"model": model_id, "max_tokens": min(max_tokens, 32000),
+            "messages": [{"role": "system", "content": system if structured else _json_prompt(system, schema)},
+                         {"role": "user", "content": user}]}
+    if structured:
+        body["response_format"] = {"type": "json_schema",
+                                   "json_schema": {"name": "result", "strict": True, "schema": schema}}
+        body["provider"] = {"require_parameters": True}
+    if "reasoning" in caps:
+        body["reasoning"] = {"effort": "high" if reasoning else "low"}
+    headers = {"Authorization": f"Bearer {openrouter_key()}", "X-Title": "AI Article",
+               "HTTP-Referer": "https://github.com/Ilya-Sidor/ai-article"}
+    for attempt in range(3):
+        try:
+            r = _or_post(f"{OPENROUTER_URL}/chat/completions", body, headers, timeout=600)
+        except httpx.HTTPError as exc:
+            raise _Skip("connection", "нет соединения с OpenRouter") from exc
+        text = r.text[:400]
+        if r.status_code == 429:
+            if re.search(r"per.?day|free-models-per-day|daily", text, re.I):
+                _block("openrouter:*", "исчерпан дневной лимит бесплатных моделей OpenRouter")
+                raise _Skip("daily", text)
+            if attempt < 2:
+                time.sleep(10 * (attempt + 1))
+                continue
+            raise _Skip("rate", text)
+        if r.status_code in (401, 403):
+            _block("openrouter:*", "ключ OpenRouter отклонён", minutes=10)
+            raise _Skip("auth", "OpenRouter отклонил ключ")
+        if r.status_code == 404:
+            _block(entry, "модель недоступна: проверьте в настройках приватности OpenRouter, что разрешены "
+                          "бесплатные эндпоинты (free endpoints)")
+            raise _Skip("model", text)
+        if r.status_code != 200:
+            raise _Skip("status", f"OpenRouter {r.status_code}: {text}")
+        data = r.json()
+        if data.get("error"):
+            raise _Skip("status", str(data["error"])[:300])
+        try:
+            content = data["choices"][0]["message"]["content"]
+            return _parse_json(content)
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise _Skip("invalid", "модель вернула некорректный JSON") from exc
+    raise _Skip("rate", "OpenRouter: лимит запросов в минуту")
+
+
+def _chain_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
+    """Walk the chain: the first model that can answer does; the answering model is logged."""
     if gate:
         _gate(project)
-    key = gemini_key()
-    if not key:
-        raise LLMUnavailable("не задан ключ Google Gemini API")
-    _local.model = None
-    base_system = system
-    response_format = {"type": "text", "mime_type": "application/json", "schema": schema}
-    last_daily = None
-    for m in _gemini_chain(model):
-        if m in exhausted_models():
+    entries = _chain_for(model)
+    if not entries:
+        raise LLMUnavailable("не заданы ключи ИИ-провайдеров — «Аккаунт → ИИ-модели»")
+    reasons = []
+    down = set()  # providers that failed as a whole in this request (key rejected, no connection)
+    for entry in entries:
+        prov, model_id = entry.split(":", 1)
+        if _is_blocked(entry) or prov in down:
             continue
-        body = {"model": m, "system_instruction": system, "input": user, "response_format": response_format,
-                "generation_config": {"max_output_tokens": min(max_tokens, 65536),
-                                      "thinking_level": "high" if model == MODEL_REASONING else "low"}}
-        attempt = 0
-        while True:
-            try:
-                interaction = gemini_client(key).interactions.create(**body, timeout=900)
-            except Exception as exc:
-                kind, status, msg = _classify(exc)
-                if kind == "rate" and attempt < 3:
-                    time.sleep(_retry_delay(exc, attempt))
-                    attempt += 1
-                    continue
-                if kind in ("daily", "rate", "model"):
-                    if kind == "daily":
-                        _exhausted[m] = (_next_quota_reset(), msg[:300])
-                        last_daily = msg
-                    break  # try the next model
-                if kind == "schema" and "schema" in response_format:
-                    response_format = {"type": "text", "mime_type": "application/json"}  # validated below
-                    system = base_system + "\n\nReturn only JSON matching this schema:\n" + json.dumps(
-                        schema, ensure_ascii=False)
-                    body.update(response_format=response_format, system_instruction=system)
-                    continue
-                if kind == "auth":
-                    raise LLMUnavailable("Gemini API отклонил ключ — проверьте его в «Аккаунт → ИИ-модели»") from exc
-                if kind == "connection":
-                    raise LLMUnavailable("нет соединения с Gemini API — проверьте интернет/VPN") from exc
-                raise LLMUnavailable(f"ошибка Gemini API ({status or 'нет кода'}): {msg[:200]}") from exc
-            _log(project["id"], purpose, m, base_system + user)
-            _local.model = m
-            text = getattr(interaction, "output_text", None) or ""
-            try:
-                return json.loads(text)
-            except ValueError as exc:
-                raise LLMUnavailable("Gemini вернул некорректный JSON") from exc
-    if last_daily or exhausted_models():
-        raise LLMUnavailable("исчерпаны дневные лимиты бесплатного тарифа Gemini для всех доступных моделей — "
-                             "лимиты обновятся в полночь по тихоокеанскому времени (10:00 МСК)")
-    raise LLMUnavailable("Gemini API: превышен лимит запросов в минуту, повторите через минуту")
+        once = _gemini_once if prov == "gemini" else _openrouter_once
+        try:
+            out = once(entry, model_id, system, user, schema, max_tokens, model == MODEL_REASONING)
+        except _Skip as sk:
+            if sk.kind == "unknown":  # most likely a bug, not a quota: do not hide it behind fallbacks
+                raise LLMUnavailable(str(sk)) from sk
+            if sk.kind in ("auth", "connection"):
+                down.add(prov)
+            reasons.append((entry, sk.kind, str(sk)))
+            continue
+        if not isinstance(out, dict):
+            reasons.append((entry, "invalid", "ответ не является JSON-объектом"))
+            continue
+        _log(project["id"], purpose, model_id, system + user)
+        _local.model = model_id
+        return out
+    kinds = {k for _, k, _ in reasons}
+    if kinds & {"auth"} and not kinds - {"auth"}:
+        raise LLMUnavailable("ключ API отклонён — проверьте его в «Аккаунт → ИИ-модели»")
+    if kinds and kinds <= {"connection"}:
+        raise LLMUnavailable("нет соединения с ИИ-провайдером — проверьте интернет/VPN")
+    if not reasons or "daily" in kinds:
+        raise LLMUnavailable("исчерпаны дневные лимиты бесплатных моделей — Gemini обновится в 10:00 МСК, "
+                             "OpenRouter — в 03:00 МСК; можно добавить модели в цепочку в «Аккаунт → ИИ-модели»")
+    detail = "; ".join(f"{e.split(':', 1)[1]}: {msg[:80]}" for e, _, msg in reasons[-3:])
+    raise LLMUnavailable(f"ни одна модель цепочки не ответила ({detail})")
+
+
+def _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
+    return _chain_call(project, purpose, model, system, user, schema, max_tokens, gate)
 
 
 def _call(project, purpose, model, system, user, schema, max_tokens, gate=True, **extra):
     _local.model = None
-    if provider() == "gemini":
-        return _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate)
+    if provider() in ("gemini", "free", "openrouter"):
+        return _chain_call(project, purpose, model, system, user, schema, max_tokens, gate)
     if provider() == "ollama":
         out = _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate)
         _local.model = ollama_model()

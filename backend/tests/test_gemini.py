@@ -144,7 +144,7 @@ def test_schema_rejected_falls_back_to_prompted_json(api, gemini):
     out = llm._call({"id": "p", "anonymization": {"status": "confirmed"}}, "x", "m", "s", "u",
                     {"type": "object", "properties": {"fields": {"type": "array"}}}, 10)
     assert out == {"fields": []}
-    assert "schema" not in gemini.calls[-1]["response_format"] and "Return only JSON" in gemini.calls[-1]["system_instruction"]
+    assert "schema" not in gemini.calls[-1]["response_format"] and "Return only a JSON" in gemini.calls[-1]["system_instruction"]
 
 
 def test_ai_statement_names_gemini(api, gemini):

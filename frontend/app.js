@@ -758,7 +758,7 @@ async function loadMeta() {
   const s = state.meta.llm;
   document.getElementById("llm-status").replaceChildren(
     el("span", { class: "dot " + (s.available ? "on" : "off") }),
-    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `${s.provider === "gemini" ? "Gemini" : "Claude"}: ${s.reasoning_model}${s.extraction_model !== s.reasoning_model ? " / " + s.extraction_model : ""}`)
+    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `${{ gemini: "Gemini", free: "ИИ (бесплатно)", openrouter: "OpenRouter" }[s.provider] || "Claude"}: ${s.reasoning_model}${s.extraction_model !== s.reasoning_model ? " / " + s.extraction_model : ""}`)
       : `ИИ-функции отключены: ${s.reason || "модель не настроена"}`);
 }
 
@@ -896,18 +896,41 @@ async function aiSettingsCard() {
   const box = el("div", { class: "card stack" });
   const draw = (v) => {
     const provider = el("select", {}, Object.entries(v.providers).map(([k, l]) => el("option", { value: k, selected: v.provider === k, text: l })));
-    const key = el("input", { type: "password", autocomplete: "off",
-      placeholder: v.gemini.configured ? `ключ сохранён (${v.gemini.key_hint}) — введите новый, чтобы заменить` : "вставьте ключ из Google AI Studio" });
+    const keyInput = (conf, hint, placeholder) => el("input", { type: "password", autocomplete: "off",
+      placeholder: conf ? `ключ сохранён (${hint}) — введите новый, чтобы заменить` : placeholder });
+    const gKey = keyInput(v.gemini.configured, v.gemini.key_hint, "ключ из Google AI Studio");
+    const oKey = keyInput(v.openrouter.configured, v.openrouter.key_hint, "ключ из OpenRouter (sk-or-…)");
+    const chainR = el("textarea", { style: "min-height:150px;font-family:var(--mono);font-size:12px" }, v.chains.reasoning.join("\n"));
+    const chainE = el("textarea", { style: "min-height:150px;font-family:var(--mono);font-size:12px" }, v.chains.extraction.join("\n"));
     const modelSel = (current) => el("select", {}, v.gemini.models.map((m) => el("option", { value: m, selected: current === m, text: m })));
     const reasoning = modelSel(v.gemini.model_reasoning);
     const extraction = modelSel(v.gemini.model_extraction);
+    const chainBox = el("div", { class: "stack", style: "gap:8px" },
+      el("h3", { text: "Цепочки моделей" }),
+      el("p", { class: "hint small", text: "Запрос идёт к первой модели списка, у которой не исчерпан лимит; при исчерпании — к следующей. Формат строки: gemini:модель или openrouter:модель. Порядок — оценка силы моделей, его можно менять." }),
+      el("div", { class: "form-grid" },
+        el("label", { class: "field" }, el("span", { text: "Анализ и текст статьи" }), chainR,
+          el("button", { class: "small ghost", text: "по умолчанию", onclick: () => { chainR.value = v.chains.default_reasoning.join("\n"); } })),
+        el("label", { class: "field" }, el("span", { text: "Извлечение данных и проверка цитат" }), chainE,
+          el("button", { class: "small ghost", text: "по умолчанию", onclick: () => { chainE.value = v.chains.default_extraction.join("\n"); } }))),
+      v.openrouter.free_models.length ? el("details", {}, el("summary", { text: `Бесплатные модели OpenRouter сейчас (${v.openrouter.free_models.length})` }),
+        el("ul", { class: "small mono" }, v.openrouter.free_models.map((m) => el("li", {}, "openrouter:" + m.id, m.structured ? el("span", { class: "badge ok", style: "margin-left:6px", text: "JSON-схема" }) : el("span", { class: "badge", style: "margin-left:6px", text: "JSON по инструкции" }))))) : null);
+    const geminiOnly = el("div", { class: "form-grid" },
+      el("label", { class: "field" }, el("span", { text: "Gemini: анализ и текст" }), reasoning),
+      el("label", { class: "field" }, el("span", { text: "Gemini: извлечение и проверка" }), extraction));
+    const syncVisibility = () => {
+      chainBox.classList.toggle("hidden", !["free", "openrouter"].includes(provider.value));
+      geminiOnly.classList.toggle("hidden", provider.value !== "gemini");
+    };
+    provider.addEventListener("change", syncVisibility);
     const status = el("div", { class: "small" });
     const save = el("button", { class: "primary small", text: "Сохранить" });
     save.addEventListener("click", () => busy(save, async () => {
-      const body = { provider: provider.value, gemini_model_reasoning: reasoning.value, gemini_model_extraction: extraction.value };
-      if (key.value.trim()) body.gemini_api_key = key.value.trim();
+      const body = { provider: provider.value, gemini_model_reasoning: reasoning.value, gemini_model_extraction: extraction.value,
+        chain_reasoning: chainR.value, chain_extraction: chainE.value };
+      if (gKey.value.trim()) body.gemini_api_key = gKey.value.trim();
+      if (oKey.value.trim()) body.openrouter_api_key = oKey.value.trim();
       const nv = await rawApi("/admin/llm", { method: "PUT", json: body });
-      key.value = "";
       toast("Настройки ИИ сохранены");
       await loadMeta();
       draw(nv);
@@ -916,24 +939,29 @@ async function aiSettingsCard() {
     test.addEventListener("click", () => busy(test, async () => {
       const r = await rawApi("/admin/llm/test", { method: "POST" });
       status.replaceChildren(el("span", { class: "badge " + (r.ok ? "ok" : "danger"),
-        text: r.ok ? `работает: ${r.model}, ответ «${r.answer}» за ${r.seconds} с` : r.error }));
+        text: r.ok ? `работает: ответила ${r.model} за ${r.seconds} с` : r.error }));
     }));
+    const ex = Object.entries(v.exhausted || {}).filter(([k]) => k.includes(":"));
     box.replaceChildren(
       el("h2", { text: "ИИ-модели" }),
       el("div", { class: "row small" }, el("span", { class: "dot " + (v.status.available ? "on" : "off") }),
-        v.status.available ? `сейчас используется: ${v.status.reasoning_model}` : v.status.reason),
-      el("label", { class: "field" }, el("span", { text: "Провайдер" }), provider),
-      el("div", { class: "stack", style: "gap:8px" },
-        el("h3", { text: "Google Gemini" }),
-        el("p", { class: "hint small" }, "Ключ бесплатно создаётся в ",
-          el("a", { href: "https://aistudio.google.com/apikey", target: "_blank", rel: "noopener", text: "Google AI Studio → Get API key" }),
-          ". Он хранится зашифрованным и не показывается после сохранения."),
-        el("label", { class: "field" }, el("span", { text: "API-ключ" }), key),
-        el("div", { class: "form-grid" },
-          el("label", { class: "field" }, el("span", { text: "Анализ и текст статьи" }), reasoning),
-          el("label", { class: "field" }, el("span", { text: "Извлечение данных и проверка цитат" }), extraction)),
-        el("div", { class: "banner warn small", text: "На бесплатном тарифе Google может использовать запросы для улучшения своих продуктов. Приложение отправляет в модель только данные после подтверждённой анонимизации и опубликованные тексты статей и guidelines." })),
+        v.status.available ? `сейчас первой ответит: ${v.status.reasoning_model} (текст), ${v.status.extraction_model} (проверки)` : v.status.reason),
+      ex.length ? el("div", { class: "banner warn small" }, el("strong", { text: "Исчерпан лимит: " }),
+        ex.map(([k, e]) => `${k} — до ${new Date(e.until).toLocaleString("ru-RU")}`).join("; ")) : null,
+      el("label", { class: "field" }, el("span", { text: "Режим" }), provider),
+      el("div", { class: "form-grid" },
+        el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "Google Gemini" }),
+          el("p", { class: "hint small" }, "Ключ: ", el("a", { href: "https://aistudio.google.com/apikey", target: "_blank", rel: "noopener", text: "AI Studio → Get API key" })),
+          gKey),
+        el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "OpenRouter" }),
+          el("p", { class: "hint small" }, "Ключ: ", el("a", { href: "https://openrouter.ai/settings/keys", target: "_blank", rel: "noopener", text: "openrouter.ai → Keys" }),
+            ". В ", el("a", { href: "https://openrouter.ai/settings/privacy", target: "_blank", rel: "noopener", text: "Privacy" }),
+            " разрешите бесплатные эндпоинты, иначе бесплатные модели недоступны."),
+          oKey)),
+      geminiOnly, chainBox,
+      el("div", { class: "banner warn small", text: "Бесплатные тарифы: Google и провайдеры OpenRouter могут использовать запросы для обучения моделей. Приложение отправляет только данные после подтверждённой анонимизации и опубликованные тексты. Лимиты: Gemini — по каждой модели отдельно (у сильнейших ~20 запросов в день), OpenRouter — 50 запросов в день на аккаунт (1000 после разового пополнения на $10)." }),
       el("div", { class: "row" }, save, test), status);
+    syncVisibility();
   };
   try { draw(await rawApi("/admin/llm")); } catch (e) { box.replaceChildren(el("p", { class: "hint", text: e.message })); }
   return box;

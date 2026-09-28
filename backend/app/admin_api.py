@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 from . import llm, settings
 
 router = APIRouter(prefix="/api/admin")
-PROVIDERS = {"gemini": "Google Gemini API", "anthropic": "Anthropic Claude API", "ollama": "Локальная модель (Ollama)"}
+PROVIDERS = {"free": "Бесплатная цепочка: Gemini + OpenRouter", "gemini": "Только Google Gemini API",
+             "openrouter": "Только OpenRouter (бесплатные модели)", "anthropic": "Anthropic Claude API (платно)",
+             "ollama": "Локальная модель (Ollama)"}
 
 
 def _admin(request: Request):
@@ -16,13 +18,29 @@ def _admin(request: Request):
         raise HTTPException(403, "только для администратора")
 
 
+def _hint(key):
+    return ("…" + key[-4:]) if key else None
+
+
+def _free_openrouter_models():
+    caps = llm._openrouter_caps()
+    return sorted(({"id": mid, "structured": "structured_outputs" in c} for mid, c in caps.items()
+                   if mid.endswith(":free") or mid == "openrouter/free"), key=lambda m: (not m["structured"], m["id"]))
+
+
 def _view():
     key = llm.gemini_key()
     reasoning, extraction = llm.gemini_models()
+    chain_r, chain_e = llm.chains()
     return {
         "provider": llm.provider(), "providers": PROVIDERS, "status": llm.status(),
-        "gemini": {"configured": bool(key), "key_hint": ("…" + key[-4:]) if key else None,
-                   "model_reasoning": reasoning, "model_extraction": extraction, "models": llm.GEMINI_MODELS},
+        "gemini": {"configured": bool(key), "key_hint": _hint(key),
+                   "model_reasoning": reasoning, "model_extraction": extraction, "models": llm.GEMINI_CHAIN},
+        "openrouter": {"configured": bool(llm.openrouter_key()), "key_hint": _hint(llm.openrouter_key()),
+                       "free_models": _free_openrouter_models()},
+        "chains": {"reasoning": chain_r, "extraction": chain_e,
+                   "default_reasoning": llm.DEFAULT_CHAIN_REASONING, "default_extraction": llm.DEFAULT_CHAIN_EXTRACTION},
+        "exhausted": llm.exhausted_models(),
     }
 
 
@@ -35,6 +53,9 @@ def get_llm(request: Request):
 class LLMIn(BaseModel):
     provider: Optional[str] = None
     gemini_api_key: Optional[str] = Field(default=None, max_length=300)
+    openrouter_api_key: Optional[str] = Field(default=None, max_length=300)
+    chain_reasoning: Optional[str] = Field(default=None, max_length=5000)
+    chain_extraction: Optional[str] = Field(default=None, max_length=5000)
     gemini_model_reasoning: Optional[str] = Field(default=None, max_length=100)
     gemini_model_extraction: Optional[str] = Field(default=None, max_length=100)
 
@@ -48,6 +69,18 @@ def put_llm(body: LLMIn, request: Request):
         settings.set("llm.provider", body.provider)
     if body.gemini_api_key is not None:
         settings.set("llm.gemini_api_key", body.gemini_api_key.strip(), secret=True)
+    if body.openrouter_api_key is not None:
+        settings.set("llm.openrouter_api_key", body.openrouter_api_key.strip(), secret=True)
+    for field, key in (("chain_reasoning", "llm.chain_reasoning"), ("chain_extraction", "llm.chain_extraction")):
+        v = getattr(body, field)
+        if v is not None:
+            lines = [x.strip() for x in v.splitlines() if x.strip()]
+            bad = [x for x in lines if x.split(":", 1)[0] not in ("gemini", "openrouter") or ":" not in x]
+            if bad:
+                raise HTTPException(400, "каждая строка — «gemini:модель» или «openrouter:модель»; ошибка: " + bad[0])
+            settings.set(key, "\n".join(lines))
+    if body.gemini_api_key or body.openrouter_api_key:  # a new key may lift "key rejected" blocks
+        llm._exhausted.clear()
     for field, key in (("gemini_model_reasoning", "llm.gemini_model_reasoning"),
                        ("gemini_model_extraction", "llm.gemini_model_extraction")):
         v = getattr(body, field)
