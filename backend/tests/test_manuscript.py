@@ -300,3 +300,15 @@ def test_fact_ids_in_backticks_are_rendered_as_values():
                   "see `KIT` and {x}"
     assert normalize_placeholders("{{n}} stays", known) == "{{n}} stays"
     assert LATEX_LEFTOVER.search(out).group(0) == "`KIT`"
+
+
+def test_subheading_without_blank_line_keeps_paragraph_and_facts():
+    """Regression: a structured abstract came as "### Results\\n<text with {{A1.p_expr}}>" and the whole
+    paragraph was rendered as a heading with raw placeholders."""
+    from app.manuscript.render import Renderer
+    r = Renderer.__new__(Renderer)
+    r.facts = {"A1.p_expr": {"value": "p = 0.003", "desc": "p", "kind": "text"}}
+    paras = r.segments("## Results\nKi-67 correlated ({{A1.p_expr}}).\n### Conclusions\nDone.")
+    assert [p["type"] for p in paras] == ["heading", "p", "heading", "p"]
+    assert paras[0]["segments"][0]["v"] == "Results"
+    assert any(s["t"] == "fact" and s["v"] == "p = 0.003" for s in paras[1]["segments"])

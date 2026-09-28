@@ -99,6 +99,9 @@ class Renderer:
         """Paragraph list; each paragraph is a list of typed segments for the UI and the exporter."""
         paragraphs = []
         source = normalize_placeholders(source, self.facts)
+        # a "### " subheading is always its own block, even when the model puts its paragraph on the next line
+        source = re.sub(r"^[ \t]*(#{2,4} [^\n]*)$", lambda m: "\n" + "### " + m.group(1).lstrip("#").strip() + "\n",
+                        source, flags=re.M)
         for block in re.split(r"\n\s*\n", source.strip()):
             block = block.strip()
             if not block:
