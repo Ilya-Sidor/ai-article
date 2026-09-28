@@ -9,3 +9,4 @@ data/
 .env
 *.tmp
 backend/evals/results/
+samples/public/
