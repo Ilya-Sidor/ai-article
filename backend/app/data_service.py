@@ -1,0 +1,170 @@
+"""Upload → anonymization report → author confirmation → unified case table."""
+import uuid
+
+import pandas as pd
+
+from .anonymization import anonymize_frame
+from .ingest import build_dictionary, prepare_analysis_frame, read_table
+from .storage import ProjectStore, now_iso, read_json, write_json
+
+
+class DataError(ValueError):
+    pass
+
+
+def upload(store: ProjectStore, pid: str, filename: str, content: bytes) -> dict:
+    raw = read_table(filename, content)
+    if raw.empty:
+        raise DataError("файл не содержит строк")
+    link_map = store.link_map(pid)
+    clean, report = anonymize_frame(raw, filename, link_map)
+    store.save_link_map(pid, link_map)
+    del raw  # the original never touches the disk
+
+    upload_id = uuid.uuid4().hex[:8]
+    d = store.dir(pid) / "pending"
+    store.save_frame(d / f"{upload_id}.csv", clean)
+    report.update({"upload_id": upload_id, "uploaded_at": now_iso()})
+    write_json(d / f"{upload_id}.json", report)
+    store.update(pid, stage="data_pending", anonymization={"status": "pending", "confirmed_at": None})
+    store.audit(pid, "system", "data.upload.anonymized",
+                {"file": filename, "rows": report["n_rows"], "counts": report["counts"]})
+    return report
+
+
+def pending_reports(store: ProjectStore, pid: str) -> list:
+    d = store.dir(pid) / "pending"
+    if not d.exists():
+        return []
+    return sorted((read_json(p) for p in d.glob("*.json")), key=lambda r: r["uploaded_at"])
+
+
+def discard(store: ProjectStore, pid: str, upload_id: str = None):
+    d = store.dir(pid) / "pending"
+    for p in list(d.glob("*")) if d.exists() else []:
+        if upload_id is None or p.stem == upload_id:
+            p.unlink()
+    _refresh_status(store, pid)
+    store.audit(pid, "author", "data.upload.discarded", {"upload_id": upload_id or "all"})
+
+
+def _refresh_status(store, pid):
+    p = store.get(pid)
+    if pending_reports(store, pid):
+        status = "pending"
+    elif store.dataset(pid) is not None:
+        status = "confirmed"
+    else:
+        status = "none"
+    anon = dict(p["anonymization"], status=status)
+    store.update(pid, anonymization=anon)
+
+
+def _merge(base: pd.DataFrame, new: pd.DataFrame, link: str, filename: str) -> pd.DataFrame:
+    """Rows of a new file join existing cases by internal record ID when both have one;
+    otherwise they are appended as new cases."""
+    new = new.drop(columns=["_source_row"])
+    if link:
+        return base.merge(new, on=link, how="outer", suffixes=("", f" [{filename}]"))
+    return pd.concat([base, new], ignore_index=True, sort=False)
+
+
+def confirm(store: ProjectStore, pid: str) -> dict:
+    reports = pending_reports(store, pid)
+    if not reports:
+        raise DataError("нет загрузок, ожидающих подтверждения")
+    d = store.dir(pid)
+    dataset = store.dataset(pid)
+    provenance = read_json(d / "provenance.json", {})
+    for rep in reports:
+        frame = store.load_frame(d / "pending" / f"{rep['upload_id']}.csv")
+        rows = frame["_source_row"].tolist()
+        if dataset is None:
+            dataset = frame.drop(columns=["_source_row"])
+            dataset.insert(0, "case_id", ["C-%03d" % (i + 1) for i in range(len(dataset))])
+            for cid, r in zip(dataset["case_id"], rows):
+                provenance.setdefault(cid, []).append({"file": rep["file"], "row": int(r)})
+            continue
+        before = set(dataset["case_id"].dropna())
+        link = rep.get("link_column")
+        if link and link in dataset.columns:
+            lookup = dict(zip(dataset[link], dataset["case_id"]))
+            for key, r in zip(frame[link], rows):
+                if key in lookup:
+                    provenance.setdefault(lookup[key], []).append({"file": rep["file"], "row": int(r)})
+        else:
+            link = None
+        dataset = _merge(dataset, frame, link, rep["file"])
+        missing_ids = dataset["case_id"].isna()
+        start = len(before)
+        new_ids = ["C-%03d" % (start + i + 1) for i in range(int(missing_ids.sum()))]
+        dataset.loc[missing_ids, "case_id"] = new_ids
+        if not link:
+            for cid, r in zip(new_ids, rows):
+                provenance.setdefault(cid, []).append({"file": rep["file"], "row": int(r)})
+    dataset = dataset.fillna("")
+    store.save_frame(d / "dataset.csv", dataset)
+    write_json(d / "provenance.json", provenance)
+
+    old = {v["name"]: v for v in read_json(d / "dictionary.json", [])}
+    fresh = build_dictionary(dataset)
+    dictionary = [old.get(v["name"], v) if old.get(v["name"], {}).get("edited") else v for v in fresh]
+    write_json(d / "dictionary.json", dictionary)
+
+    discard_files = list((d / "pending").glob("*"))
+    for p in discard_files:
+        p.unlink()
+    p = store.update(pid, stage="data_confirmed", n_cases=int(len(dataset)),
+                     anonymization={"status": "confirmed", "confirmed_at": now_iso()})
+    store.audit(pid, "author", "anonymization.confirmed",
+                {"files": [r["file"] for r in reports], "n_cases": int(len(dataset))})
+    return p
+
+
+def dataset_view(store: ProjectStore, pid: str) -> dict:
+    df = store.dataset(pid)
+    if df is None:
+        return {"columns": [], "rows": [], "provenance": {}, "problems": [], "dictionary": []}
+    d = store.dir(pid)
+    dictionary = read_json(d / "dictionary.json", [])
+    _, problems = prepare_analysis_frame(df, dictionary)
+    return {
+        "columns": list(df.columns), "rows": df.to_dict(orient="records"),
+        "provenance": read_json(d / "provenance.json", {}), "problems": problems, "dictionary": dictionary,
+    }
+
+
+def edit_cell(store: ProjectStore, pid: str, case_id: str, column: str, value: str):
+    df = store.dataset(pid)
+    if df is None or column not in df.columns or column == "case_id":
+        raise DataError("неизвестный столбец")
+    mask = df["case_id"] == case_id
+    if not mask.any():
+        raise DataError("неизвестный случай")
+    old = df.loc[mask, column].iloc[0]
+    df.loc[mask, column] = value
+    store.save_frame(store.dir(pid) / "dataset.csv", df)
+    store.audit(pid, "author", "dataset.cell_edited", {"case_id": case_id, "column": column, "old": old, "new": value})
+
+
+ALLOWED_VTYPES = {"binary", "categorical", "ordinal", "quantitative", "identifier", "text"}
+ALLOWED_GROUPS = {"clinical", "morphology", "ihc", "molecular", "followup", "other"}
+
+
+def save_dictionary(store: ProjectStore, pid: str, items: list) -> list:
+    d = store.dir(pid)
+    current = {v["name"]: v for v in read_json(d / "dictionary.json", [])}
+    for item in items:
+        v = current.get(item.get("name"))
+        if v is None:
+            raise DataError(f"неизвестный признак: {item.get('name')}")
+        if item.get("vtype") not in ALLOWED_VTYPES or item.get("group") not in ALLOWED_GROUPS:
+            raise DataError(f"недопустимый тип или группа для «{v['name']}»")
+        changed = {k: item[k] for k in ("vtype", "group", "levels", "include", "unit", "label") if k in item}
+        if changed != {k: v.get(k) for k in changed}:
+            v.update(changed)
+            v["edited"] = True
+    result = list(current.values())
+    write_json(d / "dictionary.json", result)
+    store.audit(pid, "author", "dictionary.saved", {"n": len(items)})
+    return result

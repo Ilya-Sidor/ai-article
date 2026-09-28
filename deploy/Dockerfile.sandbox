@@ -1,0 +1,10 @@
+# Analysis sandbox: only the scientific stack, no application code, no credentials
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN pip install "numpy>=2.0" "pandas>=2.2" "scipy>=1.15" "fastapi>=0.115" "uvicorn>=0.30" \
+ && useradd --create-home --uid 10002 sandbox
+WORKDIR /srv
+COPY backend/sandbox_service.py .
+USER sandbox
+EXPOSE 8080
+CMD ["uvicorn", "sandbox_service:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1,0 +1,51 @@
+[
+  {
+    "id": "virchows-archiv",
+    "name": "Virchows Archiv",
+    "publisher": "Springer",
+    "guidelines_url": "https://link.springer.com/journal/428/submission-guidelines",
+    "csl_suggestion": "virchows-archiv"
+  },
+  {
+    "id": "modern-pathology",
+    "name": "Modern Pathology",
+    "publisher": "Elsevier (USCAP)",
+    "guidelines_url": "https://www.sciencedirect.com/journal/modern-pathology/publish/guide-for-authors",
+    "csl_suggestion": "modern-pathology"
+  },
+  {
+    "id": "histopathology",
+    "name": "Histopathology",
+    "publisher": "Wiley",
+    "guidelines_url": "https://onlinelibrary.wiley.com/page/journal/13652559/homepage/forauthors.html",
+    "csl_suggestion": "histopathology"
+  },
+  {
+    "id": "american-journal-of-surgical-pathology",
+    "name": "The American Journal of Surgical Pathology",
+    "publisher": "Wolters Kluwer",
+    "guidelines_url": "https://journals.lww.com/ajsp/pages/informationforauthors.aspx",
+    "csl_suggestion": "american-journal-of-surgical-pathology"
+  },
+  {
+    "id": "journal-of-pathology",
+    "name": "The Journal of Pathology",
+    "publisher": "Wiley",
+    "guidelines_url": "https://pathsocjournals.onlinelibrary.wiley.com/hub/journal/10969896/homepage/forauthors.html",
+    "csl_suggestion": "the-journal-of-pathology"
+  },
+  {
+    "id": "pathology",
+    "name": "Pathology",
+    "publisher": "Elsevier (RCPA)",
+    "guidelines_url": "https://www.sciencedirect.com/journal/pathology/publish/guide-for-authors",
+    "csl_suggestion": "pathology"
+  },
+  {
+    "id": "diagnostic-pathology",
+    "name": "Diagnostic Pathology",
+    "publisher": "BMC (Springer Nature)",
+    "guidelines_url": "https://diagnosticpathology.biomedcentral.com/submission-guidelines",
+    "csl_suggestion": "diagnostic-pathology"
+  }
+]

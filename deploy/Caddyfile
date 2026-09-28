@@ -1,0 +1,11 @@
+# TLS termination (NFR-4): automatic certificates, TLS 1.2+ only
+{$DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	encode gzip
+	request_body {
+		max_size 60MB
+	}
+	reverse_proxy api:8000
+}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Article</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%233b6fb6'/><text x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='Georgia'>A</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="brand-mark">A</span>
+      <span>AI Article <small>прототип · этап 0</small></span>
+    </a>
+    <nav class="row" style="gap:16px">
+      <a href="#/" class="small">Проекты</a>
+      <a href="#/journals" class="small">Журналы</a>
+      <div id="llm-status" class="llm-status"></div>
+      <span id="user-menu" class="row" style="gap:8px"></span>
+    </nav>
+  </header>
+  <main id="app" class="app"></main>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="literature.js"></script>
+  <script src="journals.js"></script>
+  <script src="manuscript.js"></script>
+  <script src="cover.js"></script>
+  <script src="ethics.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

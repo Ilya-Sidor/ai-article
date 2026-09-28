@@ -1,0 +1,23 @@
+[
+  {"pattern": "\\bdelv(e|es|ed|ing)\\b", "suggestion": "examine / analyse / study"},
+  {"pattern": "\\bplays? an? (pivotal|crucial|key|vital) role\\b", "suggestion": "is important for / contributes to"},
+  {"pattern": "\\bin the realm of\\b", "suggestion": "in"},
+  {"pattern": "\\bit is worth noting that\\b", "suggestion": "(remove) / Of note,"},
+  {"pattern": "\\bit is important to note that\\b", "suggestion": "(remove)"},
+  {"pattern": "\\ba testament to\\b", "suggestion": "shows / reflects"},
+  {"pattern": "\\bnavigat(e|es|ing) the complexit(y|ies)\\b", "suggestion": "address / manage"},
+  {"pattern": "\\bsheds? (new )?light on\\b", "suggestion": "clarifies / informs"},
+  {"pattern": "\\bintricate (interplay|relationship)\\b", "suggestion": "relationship / interaction"},
+  {"pattern": "\\bunderscor(e|es|ed|ing) the (importance|need)\\b", "suggestion": "shows the importance / indicates the need"},
+  {"pattern": "\\b(ever-evolving|rapidly evolving) (landscape|field)\\b", "suggestion": "(be specific)"},
+  {"pattern": "\\blandscape of\\b", "suggestion": "(be specific)"},
+  {"pattern": "\\btapestry\\b", "suggestion": "(remove)"},
+  {"pattern": "\\bparamount\\b", "suggestion": "essential / important"},
+  {"pattern": "\\bholistic\\b", "suggestion": "comprehensive / integrated"},
+  {"pattern": "\\bleverag(e|es|ed|ing)\\b", "suggestion": "use"},
+  {"pattern": "\\bin today's\\b", "suggestion": "currently"},
+  {"pattern": "\\bnovel insights?\\b", "suggestion": "new data / findings"},
+  {"pattern": "\\bgame[- ]changer\\b", "suggestion": "(remove)"},
+  {"pattern": "\\bmultifaceted\\b", "suggestion": "(be specific)"},
+  {"pattern": "\\bpaving the way\\b", "suggestion": "enabling / allowing"}
+]
