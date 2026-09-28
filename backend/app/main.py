@@ -53,18 +53,6 @@ def _deny(status, detail):
 
 
 @app.middleware("http")
-async def security_headers(request: Request, call_next):
-    response = await call_next(request)
-    for k, v in SECURITY_HEADERS.items():
-        if k == "Cache-Control" and not request.url.path.startswith("/api/"):
-            continue
-        response.headers.setdefault(k, v)
-    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
-        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    return response
-
-
-@app.middleware("http")
 async def access_control(request: Request, call_next):
     """Default deny for the API: session (or job credential), CSRF header, project membership, async jobs."""
     path = request.url.path
@@ -101,6 +89,19 @@ async def access_control(request: Request, call_next):
                                       request.headers.get("content-type"))
         return JSONResponse({"job_id": jid, "label": label}, status_code=202)
     return await call_next(request)
+
+
+# Registered after access_control, so it is the outermost layer and also covers its early 401/403/404 answers.
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        if k == "Cache-Control" and not request.url.path.startswith("/api/"):
+            continue
+        response.headers.setdefault(k, v)
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 app.include_router(auth.router)

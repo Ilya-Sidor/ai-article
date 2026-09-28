@@ -258,3 +258,14 @@ def test_secure_cookie_behind_https_proxy(data_dir):
     local = TestClient(main.app, headers={"x-aia": "1"})
     r = local.post("/api/auth/register", json={"email": "q@example.org", "password": "a long enough password"})
     assert "secure" not in r.headers["set-cookie"].lower()
+
+
+def test_security_headers_on_denied_requests(data_dir):
+    from fastapi.testclient import TestClient
+
+    from app import main
+    anon = TestClient(main.app, headers={"x-forwarded-proto": "https"})
+    r = anon.get("/api/projects")
+    assert r.status_code == 401
+    assert "default-src 'self'" in r.headers["content-security-policy"]
+    assert r.headers["x-frame-options"] == "DENY" and "max-age" in r.headers["strict-transport-security"]
