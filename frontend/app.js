@@ -758,7 +758,8 @@ async function loadMeta() {
   const s = state.meta.llm;
   document.getElementById("llm-status").replaceChildren(
     el("span", { class: "dot " + (s.available ? "on" : "off") }),
-    s.available ? `Claude: ${s.reasoning_model} / ${s.extraction_model}` : "Claude API не настроен — ИИ-функции отключены");
+    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `Claude: ${s.reasoning_model} / ${s.extraction_model}`)
+      : `ИИ-функции отключены: ${s.reason || "модель не настроена"}`);
 }
 
 function renderUserMenu() {

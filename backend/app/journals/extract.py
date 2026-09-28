@@ -41,13 +41,14 @@ def _catalogue():
 
 def extract_profile(profile, texts: dict):
     parts, size = [], 0
+    MAX = min(MAX_CHARS, llm.context_budget_chars())
     for sid, text in texts.items():
         block = f"=== Guidelines source {sid} ===\n{text}"
-        if size + len(block) > MAX_CHARS:
-            block = block[: MAX_CHARS - size]
+        if size + len(block) > MAX:
+            block = block[: MAX - size]
         parts.append(block)
         size += len(block)
-        if size >= MAX_CHARS:
+        if size >= MAX:
             break
     paths = [p for p in FIELDS if not p.endswith("csl_id")]
     schema = {
@@ -64,8 +65,8 @@ def extract_profile(profile, texts: dict):
     pseudo_project = {"id": f"journal:{profile['id']}", "anonymization": {"status": "confirmed"}}
     out = llm._call(pseudo_project, "extract_journal_profile", MODEL_EXTRACTION, SYSTEM, user, schema,
                     max_tokens=32000, gate=False, output_config={"effort": "medium"})
-    meta = {"model": MODEL_EXTRACTION, "created_at": now_iso(), "n_returned": len(out["fields"]),
-            "truncated": size >= MAX_CHARS, "sources": list(texts)}
+    meta = {"model": llm.effective_model(MODEL_EXTRACTION), "created_at": now_iso(),
+            "n_returned": len(out["fields"]), "truncated": size >= MAX, "sources": list(texts)}
     return out["fields"], meta
 
 

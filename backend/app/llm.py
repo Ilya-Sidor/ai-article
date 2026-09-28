@@ -1,4 +1,9 @@
-"""Claude integration with a privacy gate (FR-1.2, NFR-3, NFR-7).
+"""LLM integration with a privacy gate (FR-1.2, NFR-3, NFR-7).
+
+Providers (``AI_ARTICLE_LLM_PROVIDER``):
+* ``anthropic`` (default) — Claude API;
+* ``ollama`` — a local open-weight model served by Ollama (free, runs on the author's
+  computer, nothing leaves it). Structured outputs use Ollama's JSON-schema ``format``.
 
 Rules enforced here:
 * no request is sent for a project whose anonymization report is not confirmed;
@@ -8,12 +13,37 @@ Rules enforced here:
   never content.
 """
 import json
+import os
 import re
 
 import anthropic
+import httpx
 
 from .config import MODEL_EXTRACTION, MODEL_REASONING
 from .storage import now_iso
+
+
+def provider():
+    return os.environ.get("AI_ARTICLE_LLM_PROVIDER", "anthropic").lower()
+
+
+def ollama_url():
+    return os.environ.get("AI_ARTICLE_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def ollama_model():
+    return os.environ.get("AI_ARTICLE_OLLAMA_MODEL", "qwen3:8b")
+
+
+def effective_model(model):
+    return ollama_model() if provider() == "ollama" else model
+
+
+def context_budget_chars():
+    """How much source text (papers, guidelines) one request may carry."""
+    if provider() == "ollama":
+        return int(os.environ.get("AI_ARTICLE_OLLAMA_MAX_CHARS", "60000"))
+    return 400_000
 
 
 class LLMUnavailable(RuntimeError):
@@ -38,12 +68,33 @@ def client():
 
 
 def status():
+    if provider() == "ollama":
+        m = ollama_model()
+        base = {"provider": "ollama", "reasoning_model": m, "extraction_model": m, "local": True}
+        try:
+            tags = _http_get(f"{ollama_url()}/api/tags").json().get("models", [])
+        except Exception:
+            return {**base, "available": False,
+                    "reason": f"локальная модель недоступна: Ollama не запущен ({ollama_url()})"}
+        if not any(t.get("name") == m or t.get("model") == m for t in tags):
+            return {**base, "available": False, "reason": f"модель {m} не загружена в Ollama"}
+        return {**base, "available": True}
     try:
         client()
-        return {"available": True, "reasoning_model": MODEL_REASONING, "extraction_model": MODEL_EXTRACTION}
+        return {"provider": "anthropic", "available": True, "reasoning_model": MODEL_REASONING,
+                "extraction_model": MODEL_EXTRACTION, "local": False}
     except LLMUnavailable as exc:
-        return {"available": False, "reason": str(exc), "reasoning_model": MODEL_REASONING,
-                "extraction_model": MODEL_EXTRACTION}
+        return {"provider": "anthropic", "available": False, "reason": str(exc), "reasoning_model": MODEL_REASONING,
+                "extraction_model": MODEL_EXTRACTION, "local": False}
+
+
+def _http_get(url):
+    return httpx.get(url, timeout=10)
+
+
+def _http_post(url, payload, timeout):
+    """Single HTTP entry point for the local model (patched in tests)."""
+    return httpx.post(url, json=payload, timeout=timeout)
 
 
 def _gate(project: dict):
@@ -98,7 +149,39 @@ def final_json(response):
     return json.loads(text)
 
 
+def _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
+    """Structured request to the local model; the JSON schema is enforced by Ollama."""
+    if gate:
+        _gate(project)
+    m = ollama_model()
+    _log(project["id"], purpose, m, system + user)
+    think = os.environ.get("AI_ARTICLE_OLLAMA_THINK", "auto")
+    payload = {
+        "model": m, "stream": False, "format": schema,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "think": (model == MODEL_REASONING) if think == "auto" else think == "1",
+        "options": {"temperature": 0.2, "num_ctx": int(os.environ.get("AI_ARTICLE_OLLAMA_NUM_CTX", "24576")),
+                    "num_predict": min(max_tokens, 8192)},
+    }
+    try:
+        r = _http_post(f"{ollama_url()}/api/chat", payload, timeout=900)
+    except httpx.HTTPError as exc:
+        raise LLMUnavailable(f"локальная модель недоступна: запустите Ollama ({ollama_url()})") from exc
+    if r.status_code != 200:
+        detail = r.text[:300]
+        raise LLMUnavailable(f"локальная модель вернула ошибку {r.status_code}: {detail}")
+    data = r.json()
+    if data.get("done_reason") == "length":
+        raise LLMUnavailable("ответ локальной модели обрезан по длине — сократите запрос")
+    try:
+        return json.loads(data["message"]["content"])
+    except (KeyError, ValueError) as exc:
+        raise LLMUnavailable("локальная модель вернула некорректный JSON") from exc
+
+
 def _call(project, purpose, model, system, user, schema, max_tokens, gate=True, **extra):
+    if provider() == "ollama":
+        return _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate)
     response = request(
         project, purpose, model, gate=gate, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}],
@@ -191,7 +274,7 @@ def interpret_finding(project: dict, finding: dict, context: dict) -> dict:
                    INTERPRETATION_SCHEMA, max_tokens=16000, output_config={"effort": "medium"},
                    betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     result["unverified_numbers"] = unverified_numbers(result, payload)
-    result["model"] = MODEL_REASONING
+    result["model"] = effective_model(MODEL_REASONING)
     result["created_at"] = now_iso()
     return result
 

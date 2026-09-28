@@ -285,7 +285,7 @@ def generate_plan(pid: str):
     for item in state["tables"] + state["figures"]:
         item["include"] = item["id"] in chosen or item["id"] == "t1"
     state["plan"] = {"key_messages": out["key_messages"], "sections": out["sections"], "rationale": out["rationale"],
-                     "status": "draft", "created_at": now_iso(), "model": llm.MODEL_REASONING,
+                     "status": "draft", "created_at": now_iso(), "model": llm.effective_model(llm.MODEL_REASONING),
                      "unknown_assets": sorted(chosen - ids)}
     ms.save(store, pid, state)
     store.audit(pid, "agent", "manuscript.plan_generated", {"sections": len(out["sections"])})

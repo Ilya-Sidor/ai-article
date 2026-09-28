@@ -31,8 +31,39 @@ SEARCH_TOOL = {
 }
 
 
+QUERIES_SCHEMA = {
+    "type": "object",
+    "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
+    "required": ["queries"], "additionalProperties": False,
+}
+
+
+def _retrieve_then_answer(project, purpose, system, user, schema, search_fn, gate):
+    """For models without reliable tool use (local): the model proposes queries, code searches,
+    the model answers from the returned fragments. Citation checks downstream are unchanged."""
+    q = llm._call(project, purpose + ":queries", MODEL_EXTRACTION,
+                  "Propose 2-4 specific English search queries for the author's literature base that would find "
+                  "the fragments needed for the task below. Return only the queries.",
+                  f"Task instructions:\n{system}\n\nTask input:\n{user}", QUERIES_SCHEMA, max_tokens=1000,
+                  gate=gate)
+    queries = [x.strip()[:300] for x in q["queries"] if x.strip()][:MAX_SEARCHES]
+    seen, fragments = set(), []
+    for query in queries:
+        for h in search_fn(query):
+            if h["id"] not in seen and len(fragments) < 14:
+                seen.add(h["id"])
+                fragments.append({"chunk_id": h["id"], "source": h["source_label"], "page": h.get("page"),
+                                  "section": h.get("section"), "text": h["text"]})
+    answer_user = (user + "\n\nFragments returned by search_literature (cite only these, by chunk_id, with quotes "
+                   "copied exactly):\n" + json.dumps(fragments, ensure_ascii=False))
+    out = llm._call(project, purpose, MODEL_REASONING, system, answer_user, schema, max_tokens=8000, gate=gate)
+    return out, queries
+
+
 def _run_with_search(project, purpose, system, user, schema, search_fn, gate):
     """Manual tool loop: Claude may call search_literature, then returns JSON matching ``schema``."""
+    if llm.provider() != "anthropic":
+        return _retrieve_then_answer(project, purpose, system, user, schema, search_fn, gate)
     messages = [{"role": "user", "content": user}]
     queries = []
     for _ in range(MAX_TURNS):
@@ -92,7 +123,8 @@ def verify_citation(project, claim, chunk, quote):
     out = llm._call(project, "verify_citation", MODEL_EXTRACTION, VERIFY_SYSTEM, user, VERIFY_SCHEMA,
                     max_tokens=2000, gate=False, output_config={"effort": "low"})
     status = {"supported": "supported", "partial": "partial", "not_supported": "not_supported"}[out["verdict"]]
-    return {"status": status, "rationale": out["rationale"], "model": MODEL_EXTRACTION, "ts": now_iso()}
+    return {"status": status, "rationale": out["rationale"], "model": llm.effective_model(MODEL_EXTRACTION),
+            "ts": now_iso()}
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +169,10 @@ The paper is given as fragments, each headed by [chunk_id | page | section].
 
 def extract_source(project, source, chunks):
     parts, size = [], 0
+    budget = min(MAX_SOURCE_CHARS, llm.context_budget_chars())
     for c in chunks:
         block = f"[{c['id']} | p.{c.get('page') or '-'} | {c.get('section')}]\n{c['text']}"
-        if size + len(block) > MAX_SOURCE_CHARS:
+        if size + len(block) > budget:
             break
         parts.append(block)
         size += len(block)
@@ -159,7 +192,8 @@ def extract_source(project, source, chunks):
             item["grounded"] = False
             item["issue"] = item.pop("reason")
         out[key] = ok + rejected
-    out.update({"model": MODEL_EXTRACTION, "created_at": now_iso(), "truncated": len(parts) < len(chunks)})
+    out.update({"model": llm.effective_model(MODEL_EXTRACTION), "created_at": now_iso(),
+                "truncated": len(parts) < len(chunks)})
     return out
 
 
@@ -209,7 +243,7 @@ def compare_finding(project, finding, search_fn, chunks_lookup):
     out, queries = _run_with_search(project, "compare_finding", COMPARE_SYSTEM, user, COMPARE_SCHEMA, search_fn,
                                     gate=True)
     ok, rejected = check_evidence(out["evidence"], chunks_lookup)
-    out.update({"evidence": ok, "rejected": rejected, "queries": queries, "model": MODEL_REASONING,
+    out.update({"evidence": ok, "rejected": rejected, "queries": queries, "model": llm.effective_model(MODEL_REASONING),
                 "created_at": now_iso()})
     return out
 
@@ -261,4 +295,5 @@ def ground_text(project, text, search_fn, chunks_lookup):
         if status == "cited" and not ok:
             status = "needs_source"
         result.append({"index": i, "text": sent, "status": status, "evidence": ok, "rejected": rejected})
-    return {"sentences": result, "queries": queries, "model": MODEL_REASONING, "created_at": now_iso()}
+    return {"sentences": result, "queries": queries, "model": llm.effective_model(MODEL_REASONING),
+            "created_at": now_iso()}

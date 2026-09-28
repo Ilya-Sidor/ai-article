@@ -46,9 +46,15 @@ def ai_statement(pid):
         tool = ("No generative AI was used to write this manuscript text. Statistical analyses were performed with "
                 f"reproducible Python code (SciPy {scipy_v}).")
         return tool
+    if all("claude" in m for m in models):
+        engine = f"large language models (Anthropic Claude; {', '.join(models)})"
+    elif not any("claude" in m for m in models):
+        engine = f"an open-weight large language model run locally ({', '.join(models)}, via Ollama)"
+    else:
+        engine = f"large language models ({', '.join(models)})"
     return (
-        "During the preparation of this work the authors used AI Article, a manuscript preparation tool based on "
-        f"large language models (Anthropic Claude; {', '.join(models)}), for " + "; ".join(tasks) + ". "
+        f"During the preparation of this work the authors used AI Article, a manuscript preparation tool based on "
+        f"{engine}, for " + "; ".join(tasks) + ". "
         "Statistical analyses were not performed by the language model: all reported numbers were computed by "
         f"deterministic, reproducible Python code (SciPy {scipy_v}), and the analysis script is available. "
         "Each literature citation was checked against the text of the cited source. The authors reviewed and "
