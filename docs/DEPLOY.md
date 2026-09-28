@@ -1,5 +1,32 @@
 # Развёртывание AI Article (MVP)
 
+## Вариант 1 — на своём компьютере с публичным адресом (бесплатно, текущий)
+
+Данные пациентов остаются на вашем компьютере (on-premise), наружу приложение выводит бесплатный туннель
+без регистрации. Используется сейчас.
+
+```bash
+git clone https://github.com/Ilya-Sidor/ai-article ~/ai-article
+cd ~/ai-article && python3 -m venv .venv && .venv/bin/pip install -r backend/requirements.txt
+zsh deploy/local/install.sh      # службы launchd: сервер (127.0.0.1:8765) и туннель, автозапуск и перезапуск
+cat ~/ai-article-data/public_url.txt   # публичный адрес
+cat ~/ai-article-data/setup_code.txt   # одноразовый код для первой (администраторской) учётной записи
+```
+
+* Туннель по умолчанию — serveo.net через SSH на порт 443 (работает за VPN и в сетях, где открыт только 443);
+  `AIA_TUNNEL=cloudflare` — Cloudflare quick tunnel (нужен исходящий порт 7844).
+* Адрес бесплатного туннеля может измениться (перезапуск, смена внешнего IP); актуальный всегда в
+  `~/ai-article-data/public_url.txt`. Посетители один раз видят страницу-предупреждение serveo.
+* Провайдер туннеля расшифровывает HTTPS на своей стороне: файлы с ПДн загружайте при локальном доступе
+  (http://127.0.0.1:8765) или заранее обезличенными — интерфейс предупреждает об этом.
+* Регистрация закрыта; первая учётная запись создаётся только с кодом установки.
+* Ключ Claude API — в `~/ai-article-data/.env` (`ANTHROPIC_API_KEY=…`), затем
+  `launchctl kickstart -k gui/$(id -u)/org.aiarticle.server`.
+* Обновление: `cd ~/ai-article && git pull && launchctl kickstart -k gui/$(id -u)/org.aiarticle.server`.
+* Остановка: `zsh deploy/local/uninstall.sh` (данные сохраняются).
+
+## Вариант 2 — сервер (docker compose)
+
 ## Состав
 
 | Сервис | Что делает | Сеть |
