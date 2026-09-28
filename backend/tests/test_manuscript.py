@@ -251,3 +251,39 @@ def test_checks_unit():
     assert any(i["code"] == "abbreviation" and "FISH" in i["message"] for i in issues)
     assert not any(i["code"] == "abbreviation" and "IHC" in i["message"] for i in issues)
     assert any(i["code"] == "number_literal" for i in issues)  # 24 typed instead of {{n}}
+
+
+def test_latex_from_model_json_does_not_break_export():
+    """Regression: a model wrote "$q \\bigwedge ge 0.05$" in JSON; "\\b" decoded to a backspace and python-docx
+    refused the whole draft export (Internal Server Error)."""
+    import io
+    import json
+
+    from docx import Document
+
+    from app import llm
+    from app.manuscript import checks, export
+    from app.manuscript.render import plain_text
+    raw = '{"text": "with $p < 0.05$ and $q \\\\geq 0.05$, \\\\chi^2 test; q \\bigwedge 1 \\frac12 \\u0007"}'
+    text = llm._parse_json(raw)["text"]
+    assert "\x08" not in text and "\x0c" not in text and "\x07" not in text
+    assert "\\bigwedge" in text and "\\frac12" in text
+    out = plain_text(text)
+    assert "p < 0.05" in out and "q ≥ 0.05" in out and "χ" in out and "$" not in out
+    assert plain_text("costs $5 and $10 each") == "costs $5 and $10 each"
+    assert plain_text("bad \x08eta \x0crac \x01x") == "bad β \\frac x"
+    assert checks.LATEX_LEFTOVER.search(out).group(0) == "\\bigwedge"
+
+    class R:
+        bibliography = [{"text": "Ref \x0b1"}]
+
+        def segments(self, source):
+            return [{"type": "p", "segments": [{"t": "text", "v": source}]}]
+    ctx = {"renderer": R(), "front": {"title": "T\x08", "keywords": ["k\x01"]}, "authors": [],
+           "sections": [("Methods", "methods", "q \x08igwedge ge 0.05")], "counts": {}, "tables": [
+               {"caption": "c\x02", "columns": ["a\x03"], "rows": [["v\x04"]], "footnote": "f\x05"}],
+           "figures": []}
+    data = export.build_docx(ctx, True, [{"severity": "warning", "heading": "h", "message": "m\x06"}])
+    body = "\n".join(p.text for p in Document(io.BytesIO(data)).paragraphs)
+    assert "q \\bigwedge ge 0.05" in body
+    json.dumps(body)

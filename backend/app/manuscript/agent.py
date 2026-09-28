@@ -33,7 +33,9 @@ WRITING_RULES = """Writing rules (apply to every text you produce):
   shed light on, underscore the importance, landscape, paramount, leverage; avoid starting sentences with
   Furthermore/Moreover.
 - Define each abbreviation at first use.
-- Format: paragraphs separated by a blank line; optional subheadings as lines starting with "### "."""
+- Format: plain text for a Word document, paragraphs separated by a blank line; optional subheadings as lines
+  starting with "### ". No LaTeX, no $...$ math and no Markdown emphasis: write symbols as Unicode characters
+  (≥, ≤, ±, ×, χ², α, κ)."""
 
 KIND_INSTRUCTIONS = {
     "introduction": "Introduction: background on the entity and the specific question, supported by citations; the "

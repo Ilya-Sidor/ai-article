@@ -12,6 +12,36 @@ import re
 
 from ..literature.citations import render_clusters
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_TEX_SYMBOLS = {"geq": "≥", "ge": "≥", "leq": "≤", "le": "≤", "neq": "≠", "ne": "≠", "pm": "±", "times": "×",
+                "approx": "≈", "sim": "~", "cdot": "·", "chi": "χ", "alpha": "α", "beta": "β", "kappa": "κ",
+                "mu": "μ", "rho": "ρ", "sigma": "σ", "tau": "τ", "lambda": "λ", "Delta": "Δ", "infty": "∞",
+                "rightarrow": "→", "to": "→", "%": "%", "_": "_", "&": "&", ",": " ", ";": " ", " ": " "}
+_SUPERSCRIPTS = {"2": "²", "3": "³", "-1": "⁻¹"}
+LATEX_LEFTOVER = re.compile(r"\\[A-Za-z]+|\$[^$\n]{1,120}\$")
+
+
+def _tex_math(expr):
+    expr = re.sub(r"\\(?:text|mathrm|mathit|textit|operatorname)\{([^{}]*)\}", r"\1", expr)
+    expr = re.sub(r"\^\{?(-1|2|3)\}?", lambda m: _SUPERSCRIPTS[m.group(1)], expr)
+    expr = re.sub(r"\\([A-Za-z]+|[%_&,; ])", lambda m: _TEX_SYMBOLS.get(m.group(1), m.group(0)), expr)
+    return re.sub(r"\s*([≥≤≠±×≈])\s*", r" \1 ", expr).replace("  ", " ")
+
+
+def plain_text(text):
+    """Text as it goes to the reader and to .docx: models sometimes write LaTeX math ("$p \\geq 0.05$"), and a
+    decoded JSON "\\b"/"\\f" leaves control characters that Word XML rejects. Common math becomes Unicode;
+    what cannot be converted stays visible and is flagged by the checks."""
+    if not text:
+        return text
+    text = _CTRL.sub("", text.replace("\x08", "\\b").replace("\x0c", "\\f"))
+    if "$" in text or "\\" in text:
+        text = re.sub(r"(?<![\w$])\$([^$\n]{1,120})\$(?![\w$])", lambda m: _tex_math(m.group(1)), text)
+        text = re.sub(r"\\(geq?|leq?|neq?|pm|times|approx|chi|alpha|beta|kappa|%)(?![A-Za-z])",
+                      lambda m: _TEX_SYMBOLS[m.group(1)], text)
+    return text
+
+
 TOKEN = re.compile(r"\{\{\s*([A-Za-z0-9_.:-]+)\s*\}\}|\[\[\s*(CIT-\d{4}(?:\s*,\s*CIT-\d{4})*)\s*\]\]|"
                    r"\[(?:уточнить|TODO|to confirm)\s*:\s*([^\]]+)\]", re.I)
 
@@ -58,16 +88,16 @@ class Renderer:
             if not block:
                 continue
             if block.startswith("### "):
-                paragraphs.append({"type": "heading", "segments": [{"t": "text", "v": block[4:].strip()}]})
+                paragraphs.append({"type": "heading", "segments": [{"t": "text", "v": plain_text(block[4:].strip())}]})
                 continue
             segs, pos = [], 0
             for m in TOKEN.finditer(block):
                 if m.start() > pos:
-                    segs.append({"t": "text", "v": block[pos:m.start()]})
+                    segs.append({"t": "text", "v": plain_text(block[pos:m.start()])})
                 segs.append(self._token(m))
                 pos = m.end()
             if pos < len(block):
-                segs.append({"t": "text", "v": block[pos:]})
+                segs.append({"t": "text", "v": plain_text(block[pos:])})
             paragraphs.append({"type": "p", "segments": segs})
         return paragraphs
 

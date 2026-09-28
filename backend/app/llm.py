@@ -234,7 +234,7 @@ def request(project, purpose, model, gate=True, **kwargs):
 
 def final_json(response):
     text = next(b.text for b in response.content if b.type == "text")
-    return json.loads(text)
+    return _clean_strings(json.loads(text))
 
 
 def _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
@@ -262,7 +262,7 @@ def _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate
     if data.get("done_reason") == "length":
         raise LLMUnavailable("ответ локальной модели обрезан по длине — сократите запрос")
     try:
-        return json.loads(data["message"]["content"])
+        return _clean_strings(json.loads(data["message"]["content"]))
     except (KeyError, ValueError) as exc:
         raise LLMUnavailable("локальная модель вернула некорректный JSON") from exc
 
@@ -375,15 +375,33 @@ def _json_prompt(system, schema):
         json.dumps(schema, ensure_ascii=False)
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _clean_strings(obj):
+    """Models writing LaTeX inside JSON strings ("\\geq", "\\beta", "\\frac") produce control characters when
+    the JSON is decoded ("\\b" is backspace, "\\f" form feed). Restore those backslashes and drop other control
+    characters: they are invalid in .docx XML and never intended."""
+    if isinstance(obj, str):
+        if not _CTRL.search(obj):
+            return obj
+        return _CTRL.sub("", obj.replace("\x08", "\\b").replace("\x0c", "\\f"))
+    if isinstance(obj, list):
+        return [_clean_strings(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _clean_strings(v) for k, v in obj.items()}
+    return obj
+
+
 def _parse_json(text):
     t = (text or "").strip()
     t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t)
     try:
-        return json.loads(t)
+        return _clean_strings(json.loads(t))
     except ValueError:
         m = re.search(r"\{.*\}", t, re.S)
         if m:
-            return json.loads(m.group(0))
+            return _clean_strings(json.loads(m.group(0)))
         raise
 
 

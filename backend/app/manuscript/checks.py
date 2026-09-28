@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from .. import config
-from .render import word_count
+from .render import LATEX_LEFTOVER, word_count
 
 DEFAULT_CLICHES = Path(__file__).parent / "cliches.json"
 STRONG = re.compile(r"\b(demonstrat\w*|prove[sdn]?|proves|establish\w*|confirm\w*|definitive\w*|clearly show\w*|"
@@ -72,6 +72,10 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
             abstract_text = text
         elif sec["kind"] not in ("statements",):
             main_text.append(text)
+        tex = LATEX_LEFTOVER.search(text)
+        if tex:
+            add(sec, "warning", "markup", "в тексте осталась LaTeX-разметка — перепишите формулу обычным текстом",
+                tex.group(0), "например: q ≥ 0.05")
         budget = budgets.get(sec["key"])
         if budget and wc > budget * 1.1:
             add(sec, "warning", "budget", f"{wc} слов при бюджете {budget}")

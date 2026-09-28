@@ -14,7 +14,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 from ..analysis import figures as figs
-from .render import Renderer
+from .render import Renderer, plain_text as _t
 
 
 def _base_document():
@@ -48,7 +48,7 @@ def _base_document():
 def _add_paragraph(doc, segments, draft):
     p = doc.add_paragraph()
     for seg in segments:
-        run = p.add_run(seg["v"] if seg["t"] != "todo" else f"[{seg['v']}]")
+        run = p.add_run(_t(seg["v"] if seg["t"] != "todo" else f"[{seg['v']}]"))
         if seg["t"] in ("todo", "unknown") or (seg["t"] == "cite" and seg.get("bad")):
             run.font.color.rgb = RGBColor(0xB0, 0x10, 0x30)
             run.bold = True
@@ -57,7 +57,7 @@ def _add_paragraph(doc, segments, draft):
 
 def _add_section(doc, heading, source, renderer, draft, level=1):
     if heading:
-        doc.add_heading(heading, level=level)
+        doc.add_heading(_t(heading), level=level)
     for para in renderer.segments(source):
         if para["type"] == "heading":
             doc.add_heading(para["segments"][0]["v"], level=level + 1)
@@ -69,19 +69,19 @@ def _add_table(doc, number, table):
     doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
     cap = doc.add_paragraph()
     cap.add_run(f"Table {number}. ").bold = True
-    cap.add_run(table["caption"])
+    cap.add_run(_t(table["caption"]))
     t = doc.add_table(rows=1, cols=len(table["columns"]))
     t.style = "Table Grid"
     for i, c in enumerate(table["columns"]):
-        t.rows[0].cells[i].text = c
+        t.rows[0].cells[i].text = _t(str(c))
         for r in t.rows[0].cells[i].paragraphs[0].runs:
             r.bold = True
     for row in table["rows"]:
         cells = t.add_row().cells
         for i, v in enumerate(row):
-            cells[i].text = str(v)
+            cells[i].text = _t(str(v))
     if table.get("footnote"):
-        doc.add_paragraph(table["footnote"]).runs[0].font.size = Pt(10)
+        doc.add_paragraph(_t(table["footnote"])).runs[0].font.size = Pt(10)
 
 
 def build_docx(ctx, draft, issues):
@@ -94,13 +94,13 @@ def build_docx(ctx, draft, issues):
         run.bold = True
         run.font.color.rgb = RGBColor(0xB0, 0x10, 0x30)
     front = ctx["front"]
-    doc.add_heading(front.get("title") or "[уточнить: название статьи]", level=0)
+    doc.add_heading(_t(front.get("title")) or "[уточнить: название статьи]", level=0)
     if ctx.get("authors"):
-        doc.add_paragraph(", ".join(a["name"] for a in ctx["authors"]))
+        doc.add_paragraph(_t(", ".join(a["name"] for a in ctx["authors"])))
     if front.get("running_title"):
-        doc.add_paragraph(f"Running title: {front['running_title']}")
+        doc.add_paragraph(_t(f"Running title: {front['running_title']}"))
     if front.get("keywords"):
-        doc.add_paragraph("Keywords: " + "; ".join(front["keywords"]))
+        doc.add_paragraph(_t("Keywords: " + "; ".join(front["keywords"])))
     counts = ctx["counts"]
     doc.add_paragraph(f"Word count (main text): {counts.get('words') or '—'}; abstract: "
                       f"{counts.get('abstract_words') or '—'}; tables: {len(ctx['tables'])}; "
@@ -108,7 +108,7 @@ def build_docx(ctx, draft, issues):
     if front.get("highlights"):
         doc.add_heading("Highlights", level=1)
         for h in front["highlights"]:
-            doc.add_paragraph(h, style="List Bullet")
+            doc.add_paragraph(_t(h), style="List Bullet")
 
     for heading, kind, source in ctx["sections"]:
         if kind == "abstract":
@@ -123,7 +123,7 @@ def build_docx(ctx, draft, issues):
 
     doc.add_heading("References", level=1)
     for e in r.bibliography:
-        doc.add_paragraph(e["text"])
+        doc.add_paragraph(_t(e["text"]))
     for i, t in enumerate(ctx["tables"], 1):
         _add_table(doc, i, t)
     if ctx["figures"]:
@@ -132,12 +132,12 @@ def build_docx(ctx, draft, issues):
         for i, f in enumerate(ctx["figures"], 1):
             p = doc.add_paragraph()
             p.add_run(f"Figure {i}. ").bold = True
-            p.add_run(f["caption"])
+            p.add_run(_t(f["caption"]))
     if draft and issues:
         doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
         doc.add_heading("Открытые вопросы (удалить перед подачей)", level=1)
         for it in issues:
-            doc.add_paragraph(f"[{it['severity']}] {it.get('heading') or ''}: {it['message']}", style="List Bullet")
+            doc.add_paragraph(_t(f"[{it['severity']}] {it.get('heading') or ''}: {it['message']}"), style="List Bullet")
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -145,14 +145,14 @@ def build_docx(ctx, draft, issues):
 
 def markdown(ctx):
     r = ctx["renderer"]
-    out = [f"# {ctx['front'].get('title') or '[title]'}"]
+    out = [f"# {_t(ctx['front'].get('title')) or '[title]'}"]
     for heading, kind, source in ctx["sections"]:
         out.append(f"## {heading}")
         for para in r.segments(source):
             text = "".join(s["v"] if s["t"] != "todo" else f"[{s['v']}]" for s in para["segments"])
             out.append(("### " + text) if para["type"] == "heading" else text)
     out.append("## References")
-    out += [e["text"] for e in r.bibliography]
+    out += [_t(e["text"]) for e in r.bibliography]
     return "\n\n".join(out)
 
 

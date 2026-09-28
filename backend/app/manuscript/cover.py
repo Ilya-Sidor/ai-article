@@ -220,6 +220,8 @@ def check(cover, rendered_body, raw_body, front, template, ctx):
 def docx_bytes(blocks, draft):
     from docx import Document
     from docx.shared import Pt, RGBColor
+
+    from .render import plain_text
     doc = Document()
     st = doc.styles["Normal"]
     st.font.name = "Times New Roman"
@@ -230,6 +232,7 @@ def docx_bytes(blocks, draft):
         r.bold = True
         r.font.color.rgb = RGBColor(0xB0, 0x10, 0x30)
     for kind, text in blocks:
+        text = plain_text(text) or ""
         if kind == "li":
             doc.add_paragraph(text, style="List Bullet")
         else:
