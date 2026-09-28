@@ -237,11 +237,13 @@ def test_first_account_requires_setup_code_when_configured(data_dir, monkeypatch
     from app import main
     monkeypatch.setenv("AI_ARTICLE_SETUP_CODE", "setup-123456")
     c = TestClient(main.app, headers={"x-aia": "1"})
+    assert c.get("/api/auth/setup").json() == {"setup_required": True}
     body = {"email": "admin@example.org", "password": "a long enough password"}
     r = c.post("/api/auth/register", json=body)
     assert r.status_code == 403 and r.json()["detail"]["setup_required"]
     assert c.post("/api/auth/register", json=dict(body, setup_code="wrong")).status_code == 403
     assert c.post("/api/auth/register", json=dict(body, setup_code="setup-123456")).json()["is_admin"]
+    assert c.get("/api/auth/setup").json() == {"setup_required": False}
     monkeypatch.setenv("AI_ARTICLE_REGISTRATION", "closed")
     other = TestClient(main.app, headers={"x-aia": "1"})
     assert other.post("/api/auth/register", json={"email": "x@example.org", "password": "a long enough password",

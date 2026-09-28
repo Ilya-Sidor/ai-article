@@ -204,6 +204,14 @@ def setup_code():
     return code
 
 
+@router.get("/setup")
+def setup_status():
+    """Public: whether the first (administrator) account still has to be created with the setup code."""
+    with db.engine().connect() as c:
+        n = c.execute(select(func.count()).select_from(db.users)).scalar()
+    return {"setup_required": n == 0 and bool(setup_code())}
+
+
 @router.post("/register")
 def register(body: RegisterIn, response: Response, request: Request):
     email = body.email.strip().lower()

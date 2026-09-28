@@ -36,7 +36,7 @@ async def lifespan(_app):
 app = FastAPI(title="AI Article", version="0.2.0", lifespan=lifespan)
 store = ProjectStore()
 
-PUBLIC = ("/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/health")
+PUBLIC = ("/api/auth/register", "/api/auth/login", "/api/auth/logout", "/api/auth/setup", "/api/health")
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
                                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "

@@ -835,6 +835,7 @@ function renderLogin(app, register) {
     el("p", { class: "hint small", text: "Данные проектов хранятся зашифрованными (AES-256); каждый пользователь видит только свои проекты." }));
   app.replaceChildren(form);
   email.focus();
+  if (register) rawApi("/auth/setup").then((r) => { if (r.setup_required) setupRow.classList.remove("hidden"); }).catch(() => {});
 }
 
 async function renderAccount(app) {
