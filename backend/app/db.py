@@ -81,6 +81,13 @@ llm_requests = Table(
     Column("chars", Integer, nullable=False),
 )
 
+app_settings = Table(
+    "app_settings", metadata,
+    Column("key", String(100), primary_key=True),
+    Column("value", Text),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 _engine = None
 _lock = threading.Lock()
 
@@ -111,6 +118,8 @@ def engine():
 def reset():
     """Drop the cached engine (tests switch databases)."""
     global _engine
+    from . import settings
+    settings.invalidate()
     with _lock:
         if _engine is not None:
             _engine.dispose()

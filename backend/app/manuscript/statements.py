@@ -48,7 +48,9 @@ def ai_statement(pid):
         return tool
     if all("claude" in m for m in models):
         engine = f"large language models (Anthropic Claude; {', '.join(models)})"
-    elif not any("claude" in m for m in models):
+    elif all("gemini" in m for m in models):
+        engine = f"large language models (Google Gemini; {', '.join(models)})"
+    elif not any("claude" in m or "gemini" in m for m in models):
         engine = f"an open-weight large language model run locally ({', '.join(models)}, via Ollama)"
     else:
         engine = f"large language models ({', '.join(models)})"

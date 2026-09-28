@@ -758,7 +758,7 @@ async function loadMeta() {
   const s = state.meta.llm;
   document.getElementById("llm-status").replaceChildren(
     el("span", { class: "dot " + (s.available ? "on" : "off") }),
-    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `Claude: ${s.reasoning_model} / ${s.extraction_model}`)
+    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `${s.provider === "gemini" ? "Gemini" : "Claude"}: ${s.reasoning_model}${s.extraction_model !== s.reasoning_model ? " / " + s.extraction_model : ""}`)
       : `ИИ-функции отключены: ${s.reason || "модель не настроена"}`);
 }
 
@@ -879,9 +879,62 @@ async function renderAccount(app) {
     toast("Пароль изменён; другие сеансы завершены");
     oldPw.value = newPw.value = "";
   }));
+  const aiCard = me.is_admin ? await aiSettingsCard() : null;
   app.replaceChildren(el("div", { class: "stack", style: "max-width:720px" },
-    el("h1", { text: "Аккаунт" }),
+    el("h1", { text: "Аккаунт" }), aiCard,
     el("div", { class: "card stack" }, el("div", { text: me.email }), me.is_admin ? el("span", { class: "badge accent", text: "администратор" }) : null),
     el("div", { class: "card stack" }, el("h2", { text: "Двухфакторная аутентификация" }), box2fa),
     el("div", { class: "card stack" }, el("h2", { text: "Пароль" }), el("div", { class: "row" }, oldPw, newPw, change))));
+}
+
+
+/* ------------------------------------------------------------------ *
+ * AI provider settings (administrator)
+ * ------------------------------------------------------------------ */
+
+async function aiSettingsCard() {
+  const box = el("div", { class: "card stack" });
+  const draw = (v) => {
+    const provider = el("select", {}, Object.entries(v.providers).map(([k, l]) => el("option", { value: k, selected: v.provider === k, text: l })));
+    const key = el("input", { type: "password", autocomplete: "off",
+      placeholder: v.gemini.configured ? `ключ сохранён (${v.gemini.key_hint}) — введите новый, чтобы заменить` : "вставьте ключ из Google AI Studio" });
+    const modelSel = (current) => el("select", {}, v.gemini.models.map((m) => el("option", { value: m, selected: current === m, text: m })));
+    const reasoning = modelSel(v.gemini.model_reasoning);
+    const extraction = modelSel(v.gemini.model_extraction);
+    const status = el("div", { class: "small" });
+    const save = el("button", { class: "primary small", text: "Сохранить" });
+    save.addEventListener("click", () => busy(save, async () => {
+      const body = { provider: provider.value, gemini_model_reasoning: reasoning.value, gemini_model_extraction: extraction.value };
+      if (key.value.trim()) body.gemini_api_key = key.value.trim();
+      const nv = await rawApi("/admin/llm", { method: "PUT", json: body });
+      key.value = "";
+      toast("Настройки ИИ сохранены");
+      await loadMeta();
+      draw(nv);
+    }));
+    const test = el("button", { class: "small", text: "Проверить подключение" });
+    test.addEventListener("click", () => busy(test, async () => {
+      const r = await rawApi("/admin/llm/test", { method: "POST" });
+      status.replaceChildren(el("span", { class: "badge " + (r.ok ? "ok" : "danger"),
+        text: r.ok ? `работает: ${r.model}, ответ «${r.answer}» за ${r.seconds} с` : r.error }));
+    }));
+    box.replaceChildren(
+      el("h2", { text: "ИИ-модели" }),
+      el("div", { class: "row small" }, el("span", { class: "dot " + (v.status.available ? "on" : "off") }),
+        v.status.available ? `сейчас используется: ${v.status.reasoning_model}` : v.status.reason),
+      el("label", { class: "field" }, el("span", { text: "Провайдер" }), provider),
+      el("div", { class: "stack", style: "gap:8px" },
+        el("h3", { text: "Google Gemini" }),
+        el("p", { class: "hint small" }, "Ключ бесплатно создаётся в ",
+          el("a", { href: "https://aistudio.google.com/apikey", target: "_blank", rel: "noopener", text: "Google AI Studio → Get API key" }),
+          ". Он хранится зашифрованным и не показывается после сохранения."),
+        el("label", { class: "field" }, el("span", { text: "API-ключ" }), key),
+        el("div", { class: "form-grid" },
+          el("label", { class: "field" }, el("span", { text: "Анализ и текст статьи" }), reasoning),
+          el("label", { class: "field" }, el("span", { text: "Извлечение данных и проверка цитат" }), extraction)),
+        el("div", { class: "banner warn small", text: "На бесплатном тарифе Google может использовать запросы для улучшения своих продуктов. Приложение отправляет в модель только данные после подтверждённой анонимизации и опубликованные тексты статей и guidelines." })),
+      el("div", { class: "row" }, save, test), status);
+  };
+  try { draw(await rawApi("/admin/llm")); } catch (e) { box.replaceChildren(el("p", { class: "hint", text: e.message })); }
+  return box;
 }

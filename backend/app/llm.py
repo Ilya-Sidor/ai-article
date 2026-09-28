@@ -1,9 +1,12 @@
 """LLM integration with a privacy gate (FR-1.2, NFR-3, NFR-7).
 
-Providers (``AI_ARTICLE_LLM_PROVIDER``):
+Providers (chosen by the administrator in the UI, or ``AI_ARTICLE_LLM_PROVIDER``):
 * ``anthropic`` (default) — Claude API;
-* ``ollama`` — a local open-weight model served by Ollama (free, runs on the author's
-  computer, nothing leaves it). Structured outputs use Ollama's JSON-schema ``format``.
+* ``gemini`` — Google Gemini API (free tier available; on the free tier Google may use
+  requests to improve its products, so only anonymised data may be sent — the privacy
+  gate below guarantees that for patient-derived content);
+* ``ollama`` — a local open-weight model served by Ollama (free, nothing leaves the computer).
+Structured outputs use each provider's JSON-schema mode.
 
 Rules enforced here:
 * no request is sent for a project whose anonymization report is not confirmed;
@@ -24,7 +27,23 @@ from .storage import now_iso
 
 
 def provider():
-    return os.environ.get("AI_ARTICLE_LLM_PROVIDER", "anthropic").lower()
+    from . import settings
+    return (settings.get("llm.provider", "AI_ARTICLE_LLM_PROVIDER", "anthropic") or "anthropic").lower()
+
+
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-2.5-flash"]
+GEMINI_DEFAULT = "gemini-3.8-flash"
+
+
+def gemini_models():
+    from . import settings
+    return (settings.get("llm.gemini_model_reasoning", "AI_ARTICLE_GEMINI_MODEL_REASONING", GEMINI_DEFAULT),
+            settings.get("llm.gemini_model_extraction", "AI_ARTICLE_GEMINI_MODEL_EXTRACTION", GEMINI_DEFAULT))
+
+
+def gemini_key():
+    from . import settings
+    return settings.get_secret("llm.gemini_api_key", "GEMINI_API_KEY")
 
 
 def ollama_url():
@@ -36,14 +55,20 @@ def ollama_model():
 
 
 def effective_model(model):
-    return ollama_model() if provider() == "ollama" else model
+    p = provider()
+    if p == "ollama":
+        return ollama_model()
+    if p == "gemini":
+        reasoning, extraction = gemini_models()
+        return reasoning if model == MODEL_REASONING else extraction
+    return model
 
 
 def context_budget_chars():
     """How much source text (papers, guidelines) one request may carry."""
     if provider() == "ollama":
         return int(os.environ.get("AI_ARTICLE_OLLAMA_MAX_CHARS", "60000"))
-    return 400_000
+    return 400_000  # Claude and Gemini: 1M-token context
 
 
 class LLMUnavailable(RuntimeError):
@@ -68,6 +93,13 @@ def client():
 
 
 def status():
+    if provider() == "gemini":
+        reasoning, extraction = gemini_models()
+        base = {"provider": "gemini", "reasoning_model": reasoning, "extraction_model": extraction, "local": False}
+        if not gemini_key():
+            return {**base, "available": False,
+                    "reason": "не задан ключ Google Gemini API — администратор вводит его в разделе «Аккаунт → ИИ-модели»"}
+        return {**base, "available": True}
     if provider() == "ollama":
         m = ollama_model()
         base = {"provider": "ollama", "reasoning_model": m, "extraction_model": m, "local": True}
@@ -179,7 +211,80 @@ def _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate
         raise LLMUnavailable("локальная модель вернула некорректный JSON") from exc
 
 
+_gemini = {}
+
+
+def gemini_client(key):
+    if key not in _gemini:
+        from google import genai
+        _gemini.clear()
+        _gemini[key] = genai.Client(api_key=key)
+    return _gemini[key]
+
+
+def _retry_delay(exc, attempt):
+    try:
+        for d in (exc.details or {}).get("error", {}).get("details", []):
+            if "retryDelay" in d:
+                return min(float(str(d["retryDelay"]).rstrip("s")), 90.0)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return min(10.0 * 2 ** attempt, 90.0)
+
+
+def _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
+    """Structured request to Gemini (Interactions API, JSON-schema response format)."""
+    import time
+
+    from google.genai import errors
+    if gate:
+        _gate(project)
+    key = gemini_key()
+    if not key:
+        raise LLMUnavailable("не задан ключ Google Gemini API")
+    m = effective_model(model)
+    _log(project["id"], purpose, m, system + user)
+    body = {
+        "model": m, "system_instruction": system, "input": user,
+        "response_format": {"type": "text", "mime_type": "application/json", "schema": schema},
+        "generation_config": {"max_output_tokens": min(max_tokens, 65536),
+                              "thinking_level": "high" if model == MODEL_REASONING else "low"},
+    }
+    for attempt in range(4):
+        try:
+            interaction = gemini_client(key).interactions.create(**body, timeout=900)
+            break
+        except errors.APIError as exc:
+            text = str(exc)
+            daily = bool(re.search(r"per ?day|daily", text, re.I))
+            if exc.code == 429 and not daily and attempt < 3:
+                time.sleep(_retry_delay(exc, attempt))
+                continue
+            if exc.code == 429:
+                raise LLMUnavailable("исчерпан " + ("дневной " if daily else "") +
+                                     "лимит бесплатного тарифа Gemini — повторите позже") from exc
+            if exc.code in (401, 403):
+                raise LLMUnavailable("Gemini API отклонил ключ — проверьте его в настройках") from exc
+            if exc.code == 400 and "schema" in text.lower() and "schema" in body["response_format"]:
+                body["response_format"] = {"type": "text", "mime_type": "application/json"}  # validated below
+                body["system_instruction"] = system + "\n\nReturn only JSON matching this schema:\n" + json.dumps(
+                    schema, ensure_ascii=False)
+                continue
+            raise LLMUnavailable(f"Gemini API вернул ошибку {exc.code}") from exc
+        except Exception as exc:  # network errors
+            raise LLMUnavailable("нет соединения с Gemini API") from exc
+    else:
+        raise LLMUnavailable("Gemini API: превышен лимит запросов, повторите позже")
+    text = getattr(interaction, "output_text", None) or ""
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise LLMUnavailable("Gemini вернул некорректный JSON") from exc
+
+
 def _call(project, purpose, model, system, user, schema, max_tokens, gate=True, **extra):
+    if provider() == "gemini":
+        return _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate)
     if provider() == "ollama":
         return _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate)
     response = request(
