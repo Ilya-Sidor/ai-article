@@ -116,7 +116,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 button.active-ok { background: var(--ok-soft); border-color: var(--ok); color: var(--ok); }
 button.active-danger { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 
-input[type=text], input:not([type]), textarea, select {
+input[type=text], input[type=password], input[type=email], input:not([type]), textarea, select {
   font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 7px 10px; width: 100%;
 }
