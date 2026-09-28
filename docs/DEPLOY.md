@@ -20,8 +20,9 @@ cat ~/ai-article-data/setup_code.txt   # одноразовый код для п
 * Провайдер туннеля расшифровывает HTTPS на своей стороне: файлы с ПДн загружайте при локальном доступе
   (http://127.0.0.1:8765) или заранее обезличенными — интерфейс предупреждает об этом.
 * Регистрация закрыта; первая учётная запись создаётся только с кодом установки.
-* Ключ Claude API — в `~/ai-article-data/.env` (`ANTHROPIC_API_KEY=…`), затем
-  `launchctl kickstart -k gui/$(id -u)/org.aiarticle.server`.
+* ИИ-модели выбирает администратор в приложении: «Аккаунт → ИИ-модели». По умолчанию — Google Gemini
+  (бесплатный тариф, модель `gemini-3.8-flash`): ключ создаётся в Google AI Studio и вставляется на этой
+  странице, хранится зашифрованным. Там же можно переключиться на Claude API или локальную модель (Ollama).
 * Обновление: `cd ~/ai-article && git pull && launchctl kickstart -k gui/$(id -u)/org.aiarticle.server`.
 * Остановка: `zsh deploy/local/uninstall.sh` (данные сохраняются).
 
