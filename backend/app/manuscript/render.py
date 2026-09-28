@@ -18,7 +18,22 @@ _TEX_SYMBOLS = {"geq": "≥", "ge": "≥", "leq": "≤", "le": "≤", "neq": "�
                 "mu": "μ", "rho": "ρ", "sigma": "σ", "tau": "τ", "lambda": "λ", "Delta": "Δ", "infty": "∞",
                 "rightarrow": "→", "to": "→", "%": "%", "_": "_", "&": "&", ",": " ", ";": " ", " ": " "}
 _SUPERSCRIPTS = {"2": "²", "3": "³", "-1": "⁻¹"}
-LATEX_LEFTOVER = re.compile(r"\\[A-Za-z]+|\$[^$\n]{1,120}\$")
+LATEX_LEFTOVER = re.compile(r"\\[A-Za-z]+|\$[^$\n]{1,120}\$|`[^`\n]{1,60}`")
+_LOOSE_ID = re.compile(r"`\s*\{{0,2}\s*([A-Za-z0-9_.:-]+)\s*\}{0,2}\s*`|(?<!\{)\{\s*([A-Za-z0-9_.:-]+)\s*\}(?!\})")
+
+
+def normalize_placeholders(text, known):
+    """Models sometimes mark fact ids as Markdown code (`V2.median`) or single braces ({V2.median}) instead of
+    {{V2.median}}. Ids that exist in the fact list (and table/figure refs) become real placeholders; anything
+    else is left alone and shows up in the checks."""
+    if not text or ("`" not in text and "{" not in text):
+        return text
+
+    def fix(m):
+        key = m.group(1) or m.group(2)
+        ok = key in known or key.upper().startswith(("TAB:", "FIG:"))
+        return "{{" + key + "}}" if ok else m.group(0)
+    return _LOOSE_ID.sub(fix, text)
 
 
 def _tex_math(expr):
@@ -83,6 +98,7 @@ class Renderer:
     def segments(self, source):
         """Paragraph list; each paragraph is a list of typed segments for the UI and the exporter."""
         paragraphs = []
+        source = normalize_placeholders(source, self.facts)
         for block in re.split(r"\n\s*\n", source.strip()):
             block = block.strip()
             if not block:

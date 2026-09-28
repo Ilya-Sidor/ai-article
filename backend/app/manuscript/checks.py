@@ -74,7 +74,7 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
             main_text.append(text)
         tex = LATEX_LEFTOVER.search(text)
         if tex:
-            add(sec, "warning", "markup", "в тексте осталась LaTeX-разметка — перепишите формулу обычным текстом",
+            add(sec, "warning", "markup", "в тексте осталась разметка (LaTeX или `код`) — перепишите это место обычным текстом",
                 tex.group(0), "например: q ≥ 0.05")
         budget = budgets.get(sec["key"])
         if budget and wc > budget * 1.1:

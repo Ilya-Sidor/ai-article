@@ -93,7 +93,7 @@ def _system(ctx):
 
 
 def _facts_block(ctx):
-    return "\n".join(f"{fid} — {f['desc']} = {f['value']}" for fid, f in ctx["facts"].items())
+    return "\n".join(f"{{{{{fid}}}}} — {f['desc']} = {f['value']}" for fid, f in ctx["facts"].items())
 
 
 def _context_block(ctx):
@@ -119,7 +119,8 @@ def write_section(project, section, ctx, search_fn=None, extra_sources=None):
     user = (f"Section to write: {section['heading']} (kind: {kind})\n{instr}\n\n"
             f"Plan for this section: {json.dumps(section.get('plan') or {}, ensure_ascii=False)}\n"
             f"Word budget: {section.get('budget') or 'not set'}\n\n"
-            f"Study context:\n{_context_block(ctx)}\n\nFacts (use ids as placeholders):\n{_facts_block(ctx)}\n")
+            f"Study context:\n{_context_block(ctx)}\n\nFacts (copy the placeholder exactly, with double curly braces and "
+            f"no backticks; the value after = is only for your reasoning):\n{_facts_block(ctx)}\n")
     if extra_sources:
         user += "\nAccepted sections of the manuscript (source text with placeholders):\n" + extra_sources
     purpose = f"write_section:{kind}"

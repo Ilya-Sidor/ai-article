@@ -16,7 +16,7 @@ from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
 from .manuscript import agent, assets, checks as mchecks, export, facts as mfacts, statements
 from .manuscript import store as ms
-from .manuscript.render import Renderer
+from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
 
 router = APIRouter(prefix="/api")
@@ -426,6 +426,7 @@ def generate_section(pid: str, key: str):
     has_lit = bool(lit.chunks(store, pid))
     out = agent.write_section(ctx["project"], target, ctx, _search_fn(pid) if has_lit else None, extra)
     text, report = _apply_new_citations(pid, ctx["project"], key, out)
+    text = normalize_placeholders(text, ctx["facts"])
     ms.add_version(state, key, text, "agent", "черновик агента", fp,
                    {"questions": out.get("questions", []), "citations_report": report,
                     "queries": out.get("queries", [])})
@@ -467,6 +468,7 @@ def revise(pid: str, key: str, body: ReviseIn):
     out = agent.revise_section(ctx["project"], sec, source, body.instruction, body.selection, ctx,
                                _search_fn(pid) if has_lit else None)
     text, report = _apply_new_citations(pid, ctx["project"], key, out)
+    text = normalize_placeholders(text, ctx["facts"])
     ms.add_version(state, key, text, "agent", f"по инструкции: {body.instruction[:120]}", None,
                    {"questions": out.get("questions", []), "citations_report": report})
     sec["status"] = "draft"

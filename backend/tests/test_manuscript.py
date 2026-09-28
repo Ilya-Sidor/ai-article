@@ -287,3 +287,16 @@ def test_latex_from_model_json_does_not_break_export():
     body = "\n".join(p.text for p in Document(io.BytesIO(data)).paragraphs)
     assert "q \\bigwedge ge 0.05" in body
     json.dumps(body)
+
+
+def test_fact_ids_in_backticks_are_rendered_as_values():
+    """Regression: a model wrote `V2.median` instead of {{V2.median}}; the draft showed raw ids to the reader."""
+    from app.manuscript.checks import LATEX_LEFTOVER
+    from app.manuscript.render import normalize_placeholders
+    known = {"n": {}, "V2.median": {}, "V3.L1.pct": {}}
+    src = "series (`n` cases), median `V2.median` years, female [`{{V3.L1.pct}}`%], {TAB:t1}, see `KIT` and {x}"
+    out = normalize_placeholders(src, known)
+    assert out == "series ({{n}} cases), median {{V2.median}} years, female [{{V3.L1.pct}}%], {{TAB:t1}}, " \
+                  "see `KIT` and {x}"
+    assert normalize_placeholders("{{n}} stays", known) == "{{n}} stays"
+    assert LATEX_LEFTOVER.search(out).group(0) == "`KIT`"
