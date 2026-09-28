@@ -32,6 +32,10 @@ plt.rcParams.update({"font.size": 9, "axes.edgecolor": MUTED, "axes.labelcolor":
 
 
 _DPI = {"value": 150}
+LANGUAGES = ("ru", "en")
+# fixed words drawn on the figures; variable names and categories come from the data (ru) or the terminology (en)
+_WORDS = {"ru": {"pct": "% случаев ({})"}, "en": {"pct": "% of cases ({})"}}
+_LANG = {"value": "ru"}
 
 
 def _save(fig, path):
@@ -60,7 +64,7 @@ def bar_cat(df, a, b, levels_a, levels_b, path):
             if v:
                 ax.text(j, bottom[j] + s / 2, f"{int(v)}", ha="center", va="center", color="white", fontsize=8)
         bottom += share
-    ax.set_ylabel(f"% of cases ({b})")
+    ax.set_ylabel(_WORDS[_LANG["value"]]["pct"].format(b))
     ax.set_xlabel(a)
     ax.set_ylim(0, 100)
     ax.legend(title=b, fontsize=8, title_fontsize=8, frameon=False, bbox_to_anchor=(1.02, 1), loc="upper left")
@@ -203,20 +207,21 @@ def _translate(df, spec, finding, terms):
     return df, spec, finding
 
 
-def render_finding(run_dir, finding, spec, out_path=None, dpi=150, terms=None):
+def render_finding(run_dir, finding, spec, out_path=None, dpi=150, terms=None, lang="ru"):
     """Render (and cache) the figure for a finding; returns the file path or None.
 
-    With ``out_path`` the figure is written there at ``dpi`` (journal export)."""
+    ``lang``: labels in Russian (variable names and categories as in the data) or English (from ``terms``,
+    the manuscript terminology). With ``out_path`` the figure is written there at ``dpi`` (journal export)."""
     fig_dir = run_dir / "figures"
     fig_dir.mkdir(exist_ok=True)
-    path = out_path or fig_dir / f"{finding['id']}.png"
+    path = out_path or fig_dir / f"{finding['id']}.{lang}.png"
     if path.exists() and out_path is None:
         return path
-    _DPI["value"] = dpi
+    _DPI["value"], _LANG["value"] = dpi, lang
     try:
-        return _render_finding(run_dir, finding, spec, path, terms)
+        return _render_finding(run_dir, finding, spec, path, terms if lang == "en" else None)
     finally:
-        _DPI["value"] = 150
+        _DPI["value"], _LANG["value"] = 150, "ru"
 
 
 def _render_finding(run_dir, finding, spec, path, terms=None):
@@ -239,17 +244,17 @@ def _render_finding(run_dir, finding, spec, path, terms=None):
     return path
 
 
-def render_overview(run_dir, name, spec, clustering, out_path=None, dpi=150, terms=None):
+def render_overview(run_dir, name, spec, clustering, out_path=None, dpi=150, terms=None, lang="ru"):
     fig_dir = run_dir / "figures"
     fig_dir.mkdir(exist_ok=True)
-    path = out_path or fig_dir / f"{name}.png"
+    path = out_path or fig_dir / f"{name}.{lang}.png"
     if path.exists() and out_path is None:
         return path
-    _DPI["value"] = dpi
+    _DPI["value"], _LANG["value"] = dpi, lang
     try:
-        return _render_overview(run_dir, name, spec, clustering, path, terms)
+        return _render_overview(run_dir, name, spec, clustering, path, terms if lang == "en" else None)
     finally:
-        _DPI["value"] = 150
+        _DPI["value"], _LANG["value"] = 150, "ru"
 
 
 def _render_overview(run_dir, name, spec, clustering, path, terms=None):

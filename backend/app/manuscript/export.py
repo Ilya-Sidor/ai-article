@@ -169,10 +169,11 @@ def package(ctx, draft, issues, run_dir, spec, results, extra_files):
             out = tmp / f"Figure_{i}.{fmt}"
             if f["kind"] == "finding":
                 path = figs.render_finding(run_dir, f["finding"], spec, out_path=out, dpi=ctx["dpi"],
-                                           terms=ctx.get("terms"))
+                                           terms=ctx.get("terms"), lang=ctx.get("figure_language", "en"))
             else:
                 path = figs.render_overview(run_dir, f["kind"], spec, results.get("clustering"), out_path=out,
-                                            dpi=ctx["dpi"], terms=ctx.get("terms"))
+                                            dpi=ctx["dpi"], terms=ctx.get("terms"),
+                                            lang=ctx.get("figure_language", "en"))
             if path:
                 from ..storage import read_bytes
                 z.writestr(f"figures/Figure_{i}.{fmt}", read_bytes(path))

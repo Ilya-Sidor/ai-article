@@ -210,6 +210,7 @@ def _view(pid, ctx, state):
         "plan": state.get("plan"), "inputs": state.get("inputs"), "terms": state["terms"],
         "terms_needed": mfacts.terms_needed(store, pid), "front": state.get("front") or {},
         "sections": sections, "tables": tables, "figures": figures_,
+        "figure_language": state.get("figure_language", "en"),
         "facts": [{"id": k, "desc": v["desc"], "value": v["value"]} for k, v in ctx["facts"].items()],
         "findings": ctx["findings"], "citations": ctx["citations"], "bibliography": renderer.bibliography,
         "issues": [i for i in issues if i["section"] is None], "counts": counts,
@@ -328,6 +329,7 @@ def approve_plan(pid: str):
 class AssetsIn(BaseModel):
     tables: List[dict] = []
     figures: List[dict] = []
+    figure_language: Optional[str] = None
 
 
 @router.put("/projects/{pid}/manuscript/assets")
@@ -340,6 +342,10 @@ def put_assets(pid: str, body: AssetsIn):
                 upd = by_id[it["id"]]
                 it["include"] = bool(upd.get("include", it["include"]))
                 it["caption"] = (upd.get("caption") or "").strip() or None
+    if body.figure_language is not None:
+        if body.figure_language not in figs.LANGUAGES:
+            raise HTTPException(400, "язык подписей: ru или en")
+        state["figure_language"] = body.figure_language
     ms.save(store, pid, state)
     return get_manuscript(pid)
 
@@ -624,11 +630,16 @@ def figure_preview(pid: str, fid: str):
         raise HTTPException(404, "рисунок не найден")
     run_dir = engine.run_dir_latest(store, pid)
     spec = read_json(run_dir / "spec.json")
+    # rendered as in the export (language and terminology can change at any time, so no cache)
+    lang = state.get("figure_language", "en")
+    out = run_dir / "figures" / f"manuscript_{fid}.png"
+    out.parent.mkdir(exist_ok=True)
     if item["kind"] == "finding":
         f = assets.figure_data(item, ctx["analysis"], state["terms"])["finding"]
-        path = figs.render_finding(run_dir, f, spec) if f else None
+        path = figs.render_finding(run_dir, f, spec, out_path=out, terms=state["terms"], lang=lang) if f else None
     else:
-        path = figs.render_overview(run_dir, item["kind"], spec, read_json(run_dir / "results.json", {}).get("clustering"))
+        path = figs.render_overview(run_dir, item["kind"], spec, read_json(run_dir / "results.json", {}).get("clustering"),
+                                    out_path=out, terms=state["terms"], lang=lang)
     if not path:
         raise HTTPException(404, "график недоступен")
     return Response(read_bytes(path), media_type="image/png")
@@ -711,7 +722,8 @@ def do_export(pid: str, mode: str = "draft"):
     sections = [(s["heading"], s["kind"], ms.current_source(s)) for s in ms.ordered(state)]
     ectx = {"renderer": renderer, "front": state.get("front") or {}, "sections": sections, "tables": tables,
             "figures": figures_, "counts": st["counts"], "authors": (state.get("inputs") or {}).get("authors"),
-            "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"]}
+            "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"],
+            "figure_language": state.get("figure_language", "en")}
     run_dir = engine.run_dir_latest(store, pid)
     extra = {
         "supplementary/cases_anonymized.csv": supplementary_csv(pid),

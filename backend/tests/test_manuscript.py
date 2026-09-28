@@ -312,3 +312,35 @@ def test_subheading_without_blank_line_keeps_paragraph_and_facts():
     assert [p["type"] for p in paras] == ["heading", "p", "heading", "p"]
     assert paras[0]["segments"][0]["v"] == "Results"
     assert any(s["t"] == "fact" and s["v"] == "p = 0.003" for s in paras[1]["segments"])
+
+
+def test_figure_label_language(api, project, claude, monkeypatch):
+    import matplotlib.text
+
+    from app.analysis import figures as figs
+    pid, _, _ = project
+    api.post(f"/api/projects/{pid}/manuscript/terms/auto")
+    m = api.get(f"/api/projects/{pid}/manuscript").json()
+    assert m["figure_language"] == "en"
+    drawn = []
+    orig = figs._savefig
+
+    def spy(fig, path, **kw):
+        drawn.append(" | ".join(t.get_text() for t in fig.findobj(matplotlib.text.Text)))
+        return orig(fig, path, **kw)
+    monkeypatch.setattr(figs, "_savefig", spy)
+    urls = [f"/api/projects/{pid}/manuscript/figures/{f['id']}.png" for f in m["figures"] if f["kind"] == "finding"]
+    assert all(api.get(u).status_code == 200 for u in urls)
+    bar = next(d for d in drawn if "% " in d)  # a categorical finding: stacked bars with the axis caption
+    assert "% of cases" in bar and "EN " in bar
+
+    assert api.put(f"/api/projects/{pid}/manuscript/assets", json={"figure_language": "de"}).status_code == 400
+    m = api.put(f"/api/projects/{pid}/manuscript/assets", json={"figure_language": "ru"}).json()
+    assert m["figure_language"] == "ru"
+    drawn.clear()
+    assert all(api.get(u).status_code == 200 for u in urls)
+    bar = next(d for d in drawn if "% " in d)
+    assert "% случаев" in bar and "EN " not in bar
+    drawn.clear()
+    assert api.post(f"/api/projects/{pid}/manuscript/export", params={"mode": "draft"}).status_code == 200
+    assert drawn and all("EN " not in d and "% of cases" not in d for d in drawn)

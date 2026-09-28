@@ -176,15 +176,16 @@ function msPlan(p, m, reload) {
 function msAssets(p, m, reload) {
   const tables = m.tables.map((t) => ({ ...t }));
   const figures = m.figures.map((f) => ({ ...f }));
+  let figureLanguage = m.figure_language || "en";
   const row = (it, kind) => {
     const inc = el("input", { type: "checkbox", checked: it.include, onchange: (e) => { it.include = e.target.checked; } });
     const cap = el("input", { value: it.caption || "", placeholder: it.caption_effective, onchange: (e) => { it.caption = e.target.value; } });
     return el("tr", {}, el("td", {}, inc), el("td", { class: "mono small", text: `{{${kind}:${it.id}}}` }),
       el("td", { class: "small", text: it.kind }), el("td", { style: "min-width:340px" }, cap),
-      kind === "FIG" ? el("td", {}, el("a", { href: `/api/projects/${p.id}/manuscript/figures/${it.id}.png`, target: "_blank", text: "просмотр" })) : el("td", {}));
+      kind === "FIG" ? el("td", {}, el("a", { href: `/api/projects/${p.id}/manuscript/figures/${it.id}.png?lang=${m.figure_language || "en"}`, target: "_blank", text: "просмотр" })) : el("td", {}));
   };
   const save = el("button", { class: "primary", text: "Сохранить" });
-  save.addEventListener("click", () => busy(save, async () => reload(await api(`/projects/${p.id}/manuscript/assets`, { method: "PUT", json: { tables, figures } }))));
+  save.addEventListener("click", () => busy(save, async () => reload(await api(`/projects/${p.id}/manuscript/assets`, { method: "PUT", json: { tables, figures, figure_language: figureLanguage } }))));
   const tbl = (items, kind) => el("div", { class: "table-wrap" }, el("table", {},
     el("thead", {}, el("tr", {}, ["В статье", "Ссылка в тексте", "Тип", "Подпись (пусто — по умолчанию)", ""].map((h) => el("th", { text: h })))),
     el("tbody", {}, items.map((it) => row(it, kind)))));
@@ -192,7 +193,13 @@ function msAssets(p, m, reload) {
     el("div", { class: "card stack" }, el("h3", { text: "Таблицы (FR-5.6)" }),
       el("p", { class: "hint small", text: "Значения ячеек берутся из результатов анализа. Нумерация — по порядку включённых; в тексте используются ссылки {{TAB:…}}." }), tbl(tables, "TAB")),
     el("div", { class: "card stack" }, el("h3", { text: "Рисунки (FR-5.7)" }),
-      el("p", { class: "hint small", text: `При экспорте рисунки выгружаются в формате и разрешении из профиля журнала (${m.template?.figures?.dpi_photo || 300} dpi).` }), tbl(figures, "FIG")),
+      el("p", { class: "hint small", text: `При экспорте рисунки выгружаются в формате и разрешении из профиля журнала (${m.template?.figures?.dpi_photo || 300} dpi).` }),
+      el("label", { class: "row" }, el("span", { text: "Подписи на рисунках (оси, категории, легенды):" }),
+        el("select", { onchange: (e) => { figureLanguage = e.target.value; } },
+          [["en", "Английский — из «Терминологии»"], ["ru", "Русский — как в исходных данных"]].map(([v, t]) =>
+            el("option", { value: v, text: t, selected: v === figureLanguage })))),
+      el("p", { class: "hint small", text: "После смены языка нажмите «Сохранить» — «просмотр» и экспорт покажут рисунки на выбранном языке. Подписи под рисунками (Figure legends) пишутся в поле «Подпись»." }),
+      tbl(figures, "FIG")),
     el("div", {}, save));
 }
 
