@@ -15,7 +15,8 @@ record() {
   while IFS= read -r line; do
     line=$(print -r -- "$line" | sed 's/\x1b\[[0-9;]*m//g')
     print -r -- "$line"
-    url=$(print -r -- "$line" | grep -oE 'https://[a-z0-9-]+\.(trycloudflare\.com|serveousercontent\.com|serveo\.net)' || true)
+    # only the forwarding line: serveo's tips also contain links (console.serveo.net)
+    url=$(print -r -- "$line" | grep -iE 'forwarding|trycloudflare' | grep -oE 'https://[a-z0-9-]+\.(trycloudflare\.com|serveousercontent\.com|serveo\.net)' || true)
     [ -n "$url" ] && print -r -- "$url" > "$DATA_DIR/public_url.txt"
   done
 }
