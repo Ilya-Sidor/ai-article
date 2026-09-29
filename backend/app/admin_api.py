@@ -4,8 +4,9 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 
-from . import llm, settings
+from . import auth, db, llm, settings
 
 router = APIRouter(prefix="/api/admin")
 PROVIDERS = {"free": "Бесплатная цепочка: Gemini + OpenRouter", "gemini": "Только Google Gemini API",
@@ -106,3 +107,79 @@ def test_llm(request: Request):
         return {"ok": False, "error": str(exc)}
     return {"ok": True, "answer": out.get("answer"), "seconds": round(time.time() - t, 1),
             "model": llm.effective_model(llm.MODEL_REASONING)}
+
+
+# ---------------------------------------------------------------------------
+# Colleagues: invitations and accounts
+# ---------------------------------------------------------------------------
+
+class InviteIn(BaseModel):
+    email: str = Field(default="", max_length=320)
+    days: int = Field(default=auth.INVITE_DAYS, ge=1, le=30)
+
+
+def _people():
+    with db.engine().connect() as c:
+        owned = dict(c.execute(select(db.memberships.c.user_id, func.count()).where(db.memberships.c.role == "owner")
+                               .group_by(db.memberships.c.user_id)).all())
+        users = [{"id": u["id"], "email": u["email"], "is_admin": u["is_admin"], "is_active": u["is_active"],
+                  "totp_enabled": u["totp_enabled"], "created_at": u["created_at"].isoformat(),
+                  "projects": owned.get(u["id"], 0)}
+                 for u in c.execute(select(db.users).order_by(db.users.c.id)).mappings()]
+        by_id = {u["id"]: u["email"] for u in users}
+        now = auth.now()
+        invites = []
+        for i in c.execute(select(db.invites).order_by(db.invites.c.created_at.desc()).limit(50)).mappings():
+            status = "used" if i["used_at"] else ("expired" if auth._aware(i["expires_at"]) < now else "active")
+            invites.append({"id": i["token_hash"][:12], "email": i["email"], "status": status,
+                            "created_at": i["created_at"].isoformat(), "expires_at": i["expires_at"].isoformat(),
+                            "used_by": by_id.get(i["used_by"])})
+    # the address colleagues should use in invitation links (a stable page that redirects to the current
+    # tunnel address); without it the browser's current address is used
+    return {"users": users, "invites": invites,
+            "entry_url": settings.get("app.entry_url", "AI_ARTICLE_ENTRY_URL", "") or ""}
+
+
+@router.get("/people")
+def people(request: Request):
+    _admin(request)
+    return _people()
+
+
+@router.post("/invites")
+def create_invite(body: InviteIn, request: Request):
+    _admin(request)
+    email = body.email.strip().lower()
+    if email and not auth.EMAIL_RE.match(email):
+        raise HTTPException(400, "некорректный e-mail")
+    token = auth.create_invite(request.state.user["id"], email or None, body.days)
+    return {**_people(), "token": token}
+
+
+@router.delete("/invites/{invite_id}")
+def revoke_invite(invite_id: str, request: Request):
+    _admin(request)
+    with db.engine().begin() as c:
+        n = c.execute(db.invites.delete().where(db.invites.c.token_hash.like(invite_id[:12] + "%"),
+                                                db.invites.c.used_at.is_(None))).rowcount
+    if not n:
+        raise HTTPException(404, "приглашение не найдено или уже использовано")
+    return _people()
+
+
+class UserIn(BaseModel):
+    is_active: bool
+
+
+@router.put("/users/{user_id}")
+def set_user_active(user_id: int, body: UserIn, request: Request):
+    """Block or unblock a colleague's account; a blocked user's sessions end at once, data stays."""
+    _admin(request)
+    if user_id == request.state.user["id"]:
+        raise HTTPException(400, "нельзя заблокировать собственную учётную запись")
+    with db.engine().begin() as c:
+        if not c.execute(db.users.update().where(db.users.c.id == user_id).values(is_active=body.is_active)).rowcount:
+            raise HTTPException(404, "пользователь не найден")
+        if not body.is_active:
+            c.execute(db.sessions.delete().where(db.sessions.c.user_id == user_id))
+    return _people()

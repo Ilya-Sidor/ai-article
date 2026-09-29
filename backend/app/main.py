@@ -60,7 +60,7 @@ async def access_control(request: Request, call_next):
         return await call_next(request)
     if request.method in MUTATING and request.headers.get("x-aia") != "1":
         return _deny(403, "запрос отклонён (CSRF)")
-    if path in PUBLIC:
+    if path in PUBLIC or path.startswith("/api/auth/invite/"):
         return await call_next(request)
     from starlette.concurrency import run_in_threadpool
     user = await run_in_threadpool(auth.user_from_request, request)

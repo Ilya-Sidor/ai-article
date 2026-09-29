@@ -134,7 +134,7 @@ const state = { meta: null, project: null, analysisTab: "findings", casesTab: "t
 
 async function route() {
   const app = document.getElementById("app");
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  const parts = location.hash.replace(/^#\/?/, "").split("?")[0].split("/").filter(Boolean);
   try {
     if (parts[0] === "login" || parts[0] === "register") {
       renderLogin(app, parts[0] === "register");
@@ -804,6 +804,8 @@ async function watchJobs(pid, box) {
  * ------------------------------------------------------------------ */
 
 function renderLogin(app, register) {
+  const invite = new URLSearchParams(location.hash.split("?")[1] || "").get("invite") || "";
+  const inviteBanner = el("div", { class: "hidden" });
   const email = el("input", { type: "email", placeholder: "e-mail", autocomplete: "username" });
   const password = el("input", { type: "password", placeholder: register ? "пароль (не короче 10 символов)" : "пароль",
     autocomplete: register ? "new-password" : "current-password" });
@@ -817,7 +819,7 @@ function renderLogin(app, register) {
     await busy(submit, async () => {
       try {
         state.user = await rawApi(register ? "/auth/register" : "/auth/login",
-          { json: register ? { email: email.value, password: password.value, setup_code: setup.value } : { email: email.value, password: password.value, totp: totp.value } });
+          { json: register ? { email: email.value, password: password.value, setup_code: setup.value, invite } : { email: email.value, password: password.value, totp: totp.value } });
       } catch (err) {
         if (err.detail && err.detail.mfa_required) { totpRow.classList.remove("hidden"); totp.focus(); toast(err.detail.message); return; }
         if (err.detail && err.detail.setup_required) { setupRow.classList.remove("hidden"); setup.focus(); toast(err.detail.message); return; }
@@ -828,7 +830,7 @@ function renderLogin(app, register) {
       location.hash = "#/";
     });
   } },
-    el("h1", { text: register ? "Регистрация" : "Вход" }),
+    el("h1", { text: register ? "Регистрация" : "Вход" }), inviteBanner,
     el("label", { class: "field" }, el("span", { text: "E-mail" }), email),
     el("label", { class: "field" }, el("span", { text: "Пароль" }), password),
     totpRow, setupRow, submit,
@@ -836,7 +838,19 @@ function renderLogin(app, register) {
     el("p", { class: "hint small", text: "Данные проектов хранятся зашифрованными (AES-256); каждый пользователь видит только свои проекты." }));
   app.replaceChildren(form);
   email.focus();
-  if (register) rawApi("/auth/setup").then((r) => { if (r.setup_required) setupRow.classList.remove("hidden"); }).catch(() => {});
+  if (register) rawApi("/auth/setup").then((r) => {
+    if (r.setup_required) { setupRow.classList.remove("hidden"); if (!invite) inviteBanner.className = "hidden"; }
+  }).catch(() => {});
+  if (register && invite) rawApi(`/auth/invite/${encodeURIComponent(invite)}`).then((r) => {
+    inviteBanner.className = "banner " + (r.valid ? "ok" : "warn");
+    inviteBanner.textContent = r.valid ? "Вас пригласили в AI Article. Придумайте пароль — и можно работать."
+      : "Приглашение недействительно или уже использовано. Попросите у администратора новую ссылку.";
+    if (r.valid && r.email) { email.value = r.email; email.readOnly = true; password.focus(); }
+  }).catch(() => {});
+  else if (register) {
+    inviteBanner.className = "banner";
+    inviteBanner.textContent = "Регистрация — по ссылке-приглашению от администратора.";
+  }
 }
 
 async function renderAccount(app) {
@@ -880,11 +894,75 @@ async function renderAccount(app) {
     oldPw.value = newPw.value = "";
   }));
   const aiCard = me.is_admin ? await aiSettingsCard() : null;
+  const peopleCard = me.is_admin ? await colleaguesCard(me) : null;
   app.replaceChildren(el("div", { class: "stack", style: "max-width:720px" },
-    el("h1", { text: "Аккаунт" }), aiCard,
+    el("h1", { text: "Аккаунт" }), peopleCard, aiCard,
     el("div", { class: "card stack" }, el("div", { text: me.email }), me.is_admin ? el("span", { class: "badge accent", text: "администратор" }) : null),
     el("div", { class: "card stack" }, el("h2", { text: "Двухфакторная аутентификация" }), box2fa),
     el("div", { class: "card stack" }, el("h2", { text: "Пароль" }), el("div", { class: "row" }, oldPw, newPw, change))));
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Colleagues: invitations and accounts (administrator)
+ * ------------------------------------------------------------------ */
+
+async function colleaguesCard(me) {
+  const box = el("div", { class: "card stack" });
+  const fmt = (iso) => new Date(iso).toLocaleDateString("ru-RU");
+  const draw = (v, created) => {
+    const base = (v.entry_url || location.origin).replace(/\/+$/, "");
+    const email = el("input", { type: "email", placeholder: "e-mail коллеги (необязательно)", style: "min-width:260px" });
+    const days = el("select", {}, [[7, "7 дней"], [3, "3 дня"], [14, "14 дней"], [30, "30 дней"]].map(([d, t]) => el("option", { value: d, text: t })));
+    const make = el("button", { class: "primary small", text: "Создать приглашение" });
+    make.addEventListener("click", () => busy(make, async () => {
+      const r = await rawApi("/admin/invites", { json: { email: email.value, days: Number(days.value) } });
+      // serveo's "Continue to Site" warning drops everything after "#" (the invitation); this parameter skips it
+      const skip = /serveo(usercontent)?\.(net|com)$/.test(new URL(base).hostname) ? "?serveo-skip-browser-warning=true" : "";
+      draw(r, { link: `${base}/${skip}#/register?invite=${r.token}`, email: email.value.trim(), days: days.value });
+    }));
+    let shown = null;
+    if (created) {
+      const link = el("input", { value: created.link, readOnly: true, style: "flex:1;min-width:300px", onfocus: (e) => e.target.select() });
+      const copy = el("button", { class: "small", text: "Копировать" });
+      copy.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(created.link); toast("Ссылка скопирована"); } catch { link.select(); toast("Нажмите ⌘C, чтобы скопировать"); }
+      });
+      shown = el("div", { class: "banner ok stack" },
+        el("div", { text: `Приглашение создано${created.email ? " для " + created.email : ""}. Отправьте ссылку коллеге (почта, мессенджер). Она одноразовая, действует ${created.days} дн. и показывается только сейчас.` }),
+        el("div", { class: "row" }, link, copy));
+    }
+    const statusText = { active: "ждёт регистрации", used: "использовано", expired: "истекло" };
+    const invites = v.invites.length ? el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ["Для кого", "Статус", "До", ""].map((h) => el("th", { text: h })))),
+      el("tbody", {}, v.invites.map((i) => {
+        const revoke = i.status === "active" ? el("button", { class: "small danger", text: "Отозвать" }) : null;
+        if (revoke) revoke.addEventListener("click", () => busy(revoke, async () => draw(await rawApi(`/admin/invites/${i.id}`, { method: "DELETE" }))));
+        return el("tr", {}, el("td", { text: i.email || "любой e-mail" }),
+          el("td", { text: statusText[i.status] + (i.used_by ? ` (${i.used_by})` : "") }),
+          el("td", { class: "small", text: fmt(i.expires_at) }), el("td", {}, revoke));
+      })))) : el("p", { class: "hint small", text: "Приглашений пока нет." });
+    const users = el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ["Пользователь", "Проектов", "2FA", "С", ""].map((h) => el("th", { text: h })))),
+      el("tbody", {}, v.users.map((u) => {
+        const toggle = u.id === me.id ? null : el("button", { class: "small" + (u.is_active ? " danger" : ""), text: u.is_active ? "Заблокировать" : "Разблокировать" });
+        if (toggle) toggle.addEventListener("click", () => busy(toggle, async () => {
+          if (u.is_active && !confirm(`Заблокировать ${u.email}? Вход будет закрыт сразу; проекты сохранятся.`)) return;
+          draw(await rawApi(`/admin/users/${u.id}`, { method: "PUT", json: { is_active: !u.is_active } }));
+        }));
+        return el("tr", {}, el("td", {}, u.email, u.is_admin ? el("span", { class: "badge accent", text: "админ", style: "margin-left:6px" }) : null,
+          u.is_active ? null : el("span", { class: "badge danger", text: "заблокирован", style: "margin-left:6px" })),
+          el("td", { text: String(u.projects) }), el("td", { text: u.totp_enabled ? "да" : "нет" }),
+          el("td", { class: "small", text: fmt(u.created_at) }), el("td", {}, toggle));
+      }))));
+    box.replaceChildren(...[el("h2", { text: "Коллеги" }),
+      el("p", { class: "hint small", text: "Регистрация закрыта: коллега регистрируется только по вашей одноразовой ссылке. Каждый видит только свои проекты." }),
+      el("div", { class: "row" }, email, days, make), shown,
+      el("h3", { text: "Приглашения" }), invites,
+      el("h3", { text: "Пользователи" }), users].filter(Boolean));  // replaceChildren would print "null"
+  };
+  try { draw(await rawApi("/admin/people")); } catch (e) { box.replaceChildren(el("div", { class: "banner warn", text: e.message })); }
+  return box;
 }
 
 
@@ -942,7 +1020,7 @@ async function aiSettingsCard() {
         text: r.ok ? `работает: ответила ${r.model} за ${r.seconds} с` : r.error }));
     }));
     const ex = Object.entries(v.exhausted || {}).filter(([k]) => k.includes(":"));
-    box.replaceChildren(
+    box.replaceChildren(...[
       el("h2", { text: "ИИ-модели" }),
       el("div", { class: "row small" }, el("span", { class: "dot " + (v.status.available ? "on" : "off") }),
         v.status.available ? `сейчас первой ответит: ${v.status.reasoning_model} (текст), ${v.status.extraction_model} (проверки)` : v.status.reason),
@@ -960,7 +1038,7 @@ async function aiSettingsCard() {
           oKey)),
       geminiOnly, chainBox,
       el("div", { class: "banner warn small", text: "Бесплатные тарифы: Google и провайдеры OpenRouter могут использовать запросы для обучения моделей. Приложение отправляет только данные после подтверждённой анонимизации и опубликованные тексты. Лимиты: Gemini — по каждой модели отдельно (у сильнейших ~20 запросов в день), OpenRouter — 50 запросов в день на аккаунт (1000 после разового пополнения на $10)." }),
-      el("div", { class: "row" }, save, test), status);
+      el("div", { class: "row" }, save, test), status].filter(Boolean));
     syncVisibility();
   };
   try { draw(await rawApi("/admin/llm")); } catch (e) { box.replaceChildren(el("p", { class: "hint", text: e.message })); }

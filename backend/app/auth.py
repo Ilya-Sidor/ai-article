@@ -190,6 +190,41 @@ class RegisterIn(BaseModel):
     email: str = Field(max_length=320)
     password: str = Field(min_length=MIN_PASSWORD, max_length=200)
     setup_code: str = ""
+    invite: str = Field(default="", max_length=100)
+
+
+INVITE_DAYS = 7
+
+
+def create_invite(admin_id, email=None, days=INVITE_DAYS):
+    """One-time registration token; only its hash is stored, the token itself is shown once."""
+    token = secrets.token_urlsafe(24)
+    with db.engine().begin() as c:
+        c.execute(db.invites.insert().values(token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                                             email=(email or "").strip().lower() or None, created_by=admin_id,
+                                             created_at=now(), expires_at=now() + timedelta(days=days)))
+    return token
+
+
+def _take_invite(c, token, email):
+    """Validate and consume an invitation inside the registration transaction."""
+    th = hashlib.sha256(token.strip().encode()).hexdigest()
+    inv = c.execute(select(db.invites).where(db.invites.c.token_hash == th)).mappings().first()
+    if not inv or inv["used_at"] or _aware(inv["expires_at"]) < now():
+        raise HTTPException(403, "приглашение недействительно или уже использовано — попросите у администратора новое")
+    if inv["email"] and inv["email"] != email:
+        raise HTTPException(403, f"это приглашение выписано на другой e-mail")
+    return th
+
+
+@router.get("/invite/{token}")
+def invite_status(token: str):
+    """Public: whether an invitation link is still valid (and for which e-mail, if it is bound to one)."""
+    th = hashlib.sha256(token.strip().encode()).hexdigest()
+    with db.engine().connect() as c:
+        inv = c.execute(select(db.invites).where(db.invites.c.token_hash == th)).mappings().first()
+    ok = bool(inv) and not inv["used_at"] and _aware(inv["expires_at"]) >= now()
+    return {"valid": ok, "email": inv["email"] if ok else None}
 
 
 def setup_code():
@@ -220,8 +255,9 @@ def register(body: RegisterIn, response: Response, request: Request):
     mode = os.environ.get("AI_ARTICLE_REGISTRATION", "open")  # open | closed
     with db.engine().begin() as c:
         n = c.execute(select(func.count()).select_from(db.users)).scalar()
-        if n and mode == "closed":
-            raise HTTPException(403, "регистрация закрыта — обратитесь к администратору")
+        invite = _take_invite(c, body.invite, email) if n and body.invite.strip() else None
+        if n and mode == "closed" and not invite:
+            raise HTTPException(403, "регистрация только по приглашению — попросите ссылку у администратора")
         expected = setup_code()
         if not n and expected and not hmac.compare_digest(body.setup_code.strip(), expected):
             raise HTTPException(403, detail={"message": "для первой регистрации нужен код установки",
@@ -230,6 +266,8 @@ def register(body: RegisterIn, response: Response, request: Request):
             raise HTTPException(409, "пользователь с таким e-mail уже есть")
         uid = c.execute(db.users.insert().values(email=email, password_hash=hash_password(body.password),
                                                  is_admin=n == 0, created_at=now())).inserted_primary_key[0]
+        if invite:
+            c.execute(db.invites.update().where(db.invites.c.token_hash == invite).values(used_at=now(), used_by=uid))
     if n == 0:
         _adopt_orphans(uid)
     _set_cookie(response, create_session(uid), request)

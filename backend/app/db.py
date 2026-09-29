@@ -81,6 +81,17 @@ llm_requests = Table(
     Column("chars", Integer, nullable=False),
 )
 
+invites = Table(
+    "invites", metadata,  # one-time registration links issued by an administrator
+    Column("token_hash", String(64), primary_key=True),
+    Column("email", String(320)),  # optional: the link then works only for this address
+    Column("created_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True)),
+    Column("used_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+)
+
 app_settings = Table(
     "app_settings", metadata,
     Column("key", String(100), primary_key=True),
