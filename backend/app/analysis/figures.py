@@ -181,29 +181,50 @@ def oncoprint(df, cols, variables, path):
     return True
 
 
+_TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                     ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s",
+                      "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"]))
+
+
+def latin(text):
+    """Last resort for an English figure: a label with no English term is transliterated, never left in
+    Cyrillic (the manuscript checks list such terms until the author translates them)."""
+    if not isinstance(text, str):
+        return text
+    out = []
+    for ch in text:
+        t = _TRANSLIT.get(ch.lower())
+        out.append(ch if t is None else (t.capitalize() if ch.isupper() else t))
+    return "".join(out)
+
+
 def _translate(df, spec, finding, terms):
-    """English labels for export: rename columns and category values, adapt the finding result."""
+    """English labels for export: rename columns and category values (ordinal too), adapt the finding result."""
     import copy
-    names = {k: (terms.get(k) or {}).get("en") or k for k in spec["variables"]}
+    names = {k: latin((terms.get(k) or {}).get("en") or k) for k in spec["variables"]}
     lv = {k: (terms.get(k) or {}).get("levels") or {} for k in spec["variables"]}
+
+    def level(col, x):
+        return latin(lv[col].get(x, x)) if isinstance(x, str) else x
     for col, spec_v in spec["variables"].items():
         if col in df.columns and spec_v["vtype"] in ("binary", "categorical"):
-            df[col] = df[col].map(lambda x, m=lv[col]: m.get(x, x) if isinstance(x, str) else x)
+            df[col] = df[col].map(lambda x, c=col: level(c, x))
     df = df.rename(columns=names)
     spec = copy.deepcopy(spec)
-    spec["variables"] = {names[k]: dict(v, levels=[lv[k].get(x, x) for x in v["levels"]]
-                                        if v["vtype"] in ("binary", "categorical") else v["levels"])
+    spec["variables"] = {names[k]: dict(v, levels=[level(k, x) for x in v["levels"]] if v.get("levels") else v.get("levels"))
                          for k, v in spec["variables"].items()}
     if finding and finding.get("result"):
         finding = copy.deepcopy(finding)
         r = finding["result"]
         a, b = r["a"], r["b"]
         if "levels_a" in r:
-            r["levels_a"] = [lv[a].get(x, x) for x in r["levels_a"]]
-            r["levels_b"] = [lv[b].get(x, x) for x in r["levels_b"]]
+            r["levels_a"] = [level(a, x) for x in r["levels_a"]]
+            r["levels_b"] = [level(b, x) for x in r["levels_b"]]
         for g in r.get("groups", []):
-            g["level"] = lv[a].get(g["level"], g["level"])
+            g["level"] = level(a, g["level"])
         r["a"], r["b"] = names[a], names[b]
+        if (finding.get("figure_args") or {}).get("variable") in names:
+            finding["figure_args"] = dict(finding["figure_args"], variable=names[finding["figure_args"]["variable"]])
     return df, spec, finding
 
 
@@ -219,14 +240,14 @@ def render_finding(run_dir, finding, spec, out_path=None, dpi=150, terms=None, l
         return path
     _DPI["value"], _LANG["value"] = dpi, lang
     try:
-        return _render_finding(run_dir, finding, spec, path, terms if lang == "en" else None)
+        return _render_finding(run_dir, finding, spec, path, (terms or {}) if lang == "en" else None)
     finally:
         _DPI["value"], _LANG["value"] = 150, "ru"
 
 
 def _render_finding(run_dir, finding, spec, path, terms=None):
     df = _data(run_dir, spec["variables"])
-    if terms:
+    if terms is not None:
         df, spec, finding = _translate(df, spec, finding, terms)
     variables = spec["variables"]
     ordinal_levels = {k: v["levels"] for k, v in variables.items() if v["vtype"] == "ordinal"}
@@ -252,7 +273,7 @@ def render_overview(run_dir, name, spec, clustering, out_path=None, dpi=150, ter
         return path
     _DPI["value"], _LANG["value"] = dpi, lang
     try:
-        return _render_overview(run_dir, name, spec, clustering, path, terms if lang == "en" else None)
+        return _render_overview(run_dir, name, spec, clustering, path, (terms or {}) if lang == "en" else None)
     finally:
         _DPI["value"], _LANG["value"] = 150, "ru"
 
@@ -261,10 +282,10 @@ def _render_overview(run_dir, name, spec, clustering, path, terms=None):
     df = _data(run_dir, spec["variables"])
     raw = _data(run_dir, {})
     orig_spec = spec
-    if terms:
+    if terms is not None:
         df, spec, _ = _translate(df, orig_spec, None, terms)
         raw, _, _ = _translate(raw, orig_spec, None, terms)
-        names = {k: (terms.get(k) or {}).get("en") or k for k in orig_spec["variables"]}
+        names = {k: latin((terms.get(k) or {}).get("en") or k) for k in orig_spec["variables"]}
         if clustering:
             clustering = dict(clustering, variables=[names.get(c, c) for c in clustering["variables"]])
     variables = spec["variables"]

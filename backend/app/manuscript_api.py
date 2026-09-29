@@ -147,6 +147,11 @@ def _check(pid, ctx, state, renderer):
         lvl for t in state["terms"].values() for lvl in (t.get("levels") or {}).values()]
     issues, counts = mchecks.check(sections, renderer, ctx["facts"], ctx["findings"], ctx["template"],
                                    ctx["tier_code"], inputs_text, names, _budgets(state))
+    for m in mfacts.untranslated(state["terms"], mfacts.terms_needed(store, pid)):
+        what = ([m["name"]] if m["name_missing"] else []) + [f"{m['name']}: {x}" for x in m["levels"]]
+        issues.append({"section": None, "heading": "терминология", "severity": "blocking", "code": "untranslated",
+                       "message": "нет английского перевода: " + "; ".join(what), "fragment": "",
+                       "suggestion": "«1. Терминология» → «Перевести автоматически» или впишите перевод"})
     # citations used in the text must be decided and verified
     cit = {c["id"]: c for c in lit.citations(store, pid)}
     for s in sections:
@@ -234,17 +239,32 @@ def get_manuscript(pid: str):
 @router.post("/projects/{pid}/manuscript/terms/auto")
 def auto_terms(pid: str):
     ctx, state = context(pid)
-    needed = mfacts.terms_needed(store, pid)
-    if not needed:
+    if not mfacts.terms_needed(store, pid):
         raise HTTPException(400, "сначала выполните анализ")
-    out = agent.translate_terms(ctx["project"], needed)
-    for t in out["terms"]:
-        if t["name"] in {n["name"] for n in needed} and t["name"] not in state["terms"]:
-            state["terms"][t["name"]] = {"en": t["en"], "levels": {x["value"]: x["en"] for x in t["levels"]},
-                                         "source": "agent"}
-    ms.save(store, pid, state)
-    store.audit(pid, "agent", "manuscript.terms_translated", {"n": len(out["terms"])})
+    _complete_terms(pid, ctx, state)
     return get_manuscript(pid)
+
+
+def _complete_terms(pid, ctx, state, strict=True):
+    """Translate every variable name and value that still has no English label (or a Cyrillic one).
+
+    strict=False (figure preview, export): a failed AI call leaves the gaps; figures then fall back to
+    transliteration and the checks list what is left."""
+    missing = mfacts.untranslated(state["terms"], mfacts.terms_needed(store, pid))
+    if not missing:
+        return []
+    try:
+        out = agent.translate_terms(ctx["project"], [{k: m[k] for k in ("name", "group", "vtype", "unit", "levels")}
+                                                     for m in missing])
+        translated = out["terms"]
+    except Exception:  # noqa: BLE001 — a preview or an export never fails because of the translation
+        if strict:
+            raise
+        return missing
+    mfacts.merge_terms(state["terms"], translated, missing)
+    ms.save(store, pid, state)
+    store.audit(pid, "agent", "manuscript.terms_translated", {"n": len(missing)})
+    return mfacts.untranslated(state["terms"], mfacts.terms_needed(store, pid))
 
 
 class TermsIn(BaseModel):
@@ -255,7 +275,8 @@ class TermsIn(BaseModel):
 def put_terms(pid: str, body: TermsIn):
     state = ms.load(store, pid)
     for name, t in body.terms.items():
-        state["terms"][name] = {"en": (t.get("en") or name).strip(), "levels": t.get("levels") or {},
+        state["terms"][name] = {"en": (t.get("en") or "").strip(),
+                                "levels": {k: v.strip() for k, v in (t.get("levels") or {}).items() if (v or "").strip()},
                                 "source": "author"}
     ms.save(store, pid, state)
     store.audit(pid, "author", "manuscript.terms_saved", {"n": len(body.terms)})
@@ -632,6 +653,8 @@ def figure_preview(pid: str, fid: str):
     spec = read_json(run_dir / "spec.json")
     # rendered as in the export (language and terminology can change at any time, so no cache)
     lang = state.get("figure_language", "en")
+    if lang == "en":
+        _complete_terms(pid, ctx, state, strict=False)
     out = run_dir / "figures" / f"manuscript_{fid}.png"
     out.parent.mkdir(exist_ok=True)
     if item["kind"] == "finding":
@@ -706,6 +729,8 @@ def get_export_status(pid: str):
 @router.post("/projects/{pid}/manuscript/export")
 def do_export(pid: str, mode: str = "draft"):
     from .ethics_api import supplementary_csv
+    ctx0, state0 = context(pid)
+    _complete_terms(pid, ctx0, state0, strict=False)  # the manuscript is English: tables and figures too
     st = export_status(pid)
     if mode == "final" and st["blocking"]:
         raise HTTPException(409, f"экспорт для подачи заблокирован: {len(st['blocking'])} проблем(ы)")

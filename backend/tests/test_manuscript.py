@@ -41,8 +41,10 @@ class Claude:
         user = kw["messages"][0]["content"]
         if "Translate variable names" in system:
             names = json.loads(user)
-            return self._r({"terms": [{"name": n["name"], "en": "EN " + n["name"],
-                                       "levels": [{"value": v, "en": "en-" + v} for v in n["levels"]]} for n in names]})
+            from app.analysis.figures import latin
+            return self._r({"terms": [{"name": n["name"], "en": "EN " + latin(n["name"]),
+                                       "levels": [{"value": v, "en": "en-" + latin(v)} for v in n["levels"]]}
+                                      for n in names]})
         if "You plan a pathology manuscript" in system:
             heads = re.search(r"Section headings: (\[.*?\])", user).group(1)
             heads = json.loads(heads.replace("'", '"'))
@@ -104,7 +106,7 @@ def test_facts_come_from_analysis(api, project):
 def test_full_flow(api, project, claude):
     pid, kit, expl = project
     m = api.post(f"/api/projects/{pid}/manuscript/terms/auto").json()
-    assert m["terms"]["Пол"]["en"] == "EN Пол"
+    assert m["terms"]["Пол"]["en"] == "EN Pol"
     ids = {f["title"]: f["id"] for f in m["findings"]}
     a_kit, a_expl = ids[kit["title"]], ids[expl["title"]]
 
@@ -344,3 +346,42 @@ def test_figure_label_language(api, project, claude, monkeypatch):
     drawn.clear()
     assert api.post(f"/api/projects/{pid}/manuscript/export", params={"mode": "draft"}).status_code == 200
     assert drawn and all("EN " not in d and "% of cases" not in d for d in drawn)
+
+
+def test_english_figures_have_no_cyrillic(api, project, claude, monkeypatch):
+    """Regression: terms saved with the Russian name as "English" and no value translations; English figures
+    and tables kept Russian labels, and "translate automatically" skipped such entries."""
+    import matplotlib.text
+
+    from app import llm
+    from app.analysis import figures as figs
+    cyr = re.compile("[А-Яа-яЁё]")
+    pid, _, _ = project
+    needed = api.get(f"/api/projects/{pid}/manuscript").json()["terms_needed"]
+    api.put(f"/api/projects/{pid}/manuscript/terms", json={"terms": {n["name"]: {"en": "", "levels": {}} for n in needed}})
+    m = api.get(f"/api/projects/{pid}/manuscript").json()
+    assert m["terms"]["Пол"]["en"] == ""  # a blank field is not a translation
+    assert any(i["code"] == "untranslated" and i["severity"] == "blocking" for i in m["issues"])
+
+    drawn = []
+    orig = figs._savefig
+
+    def spy(fig, path, **kw):
+        drawn.append(" | ".join(t.get_text() for t in fig.findobj(matplotlib.text.Text)))
+        return orig(fig, path, **kw)
+    monkeypatch.setattr(figs, "_savefig", spy)
+
+    def no_ai():
+        raise llm.LLMUnavailable("нет ключа")
+    # AI unavailable: English figures are still Latin-only (transliterated), and the gap stays listed
+    monkeypatch.setattr(llm, "client", no_ai)
+    urls = [f"/api/projects/{pid}/manuscript/figures/{f['id']}.png" for f in m["figures"]]
+    assert all(api.get(u).status_code in (200, 404) for u in urls) and drawn
+    assert not [d for d in drawn if cyr.search(d)]
+    # AI available: the export fills the gaps and is English throughout
+    monkeypatch.setattr(llm, "client", lambda: claude)
+    drawn.clear()
+    assert api.post(f"/api/projects/{pid}/manuscript/export", params={"mode": "draft"}).status_code == 200
+    m = api.get(f"/api/projects/{pid}/manuscript").json()
+    assert m["terms"]["Пол"]["en"] == "EN Pol" and not any(i["code"] == "untranslated" for i in m["issues"])
+    assert drawn and not [d for d in drawn if cyr.search(d)] and any("EN " in d for d in drawn)

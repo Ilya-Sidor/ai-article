@@ -5,6 +5,8 @@ The model writes numbers as placeholders such as ``{{A3.p_expr}}`` or
 engine. IDs are stable across analysis runs: findings are keyed by their test
 spec key, variables by name.
 """
+import re
+
 from ..analysis import engine
 from ..analysis.findings import fmt, fmt_p
 from ..storage import read_json
@@ -136,3 +138,38 @@ def terms_needed(store, pid):
         out.append({"name": v["variable"], "group": spec.get("group"), "vtype": v["vtype"], "unit": spec.get("unit"),
                     "levels": [c["level"] for c in v.get("counts") or []]})
     return out
+
+
+_CYRILLIC = re.compile("[А-Яа-яЁё]")
+
+
+def untranslated(terms, needed):
+    """Entries of ``needed`` whose English label is missing or still Cyrillic; ``levels`` narrowed to those
+    values. Values without Cyrillic (KIT+, 0, pT2) need no translation."""
+    out = []
+    for n in needed:
+        t = terms.get(n["name"]) or {}
+        en, lv = t.get("en") or "", t.get("levels") or {}
+        name_missing = bool(_CYRILLIC.search(n["name"])) and (not en or bool(_CYRILLIC.search(en)))
+        levels = [x for x in n["levels"] if _CYRILLIC.search(str(x)) and
+                  (not lv.get(x) or _CYRILLIC.search(lv[x]))]
+        if name_missing or levels:
+            out.append(dict(n, levels=levels, name_missing=name_missing))
+    return out
+
+
+def merge_terms(terms, translated, missing):
+    """Fill only what was missing: an author's own English label is never overwritten."""
+    wanted = {m["name"]: m for m in missing}
+    for t in translated:
+        m = wanted.get(t["name"])
+        if not m:
+            continue
+        cur = terms.setdefault(t["name"], {"en": "", "levels": {}, "source": "agent"})
+        if m["name_missing"] and t["en"].strip() and not _CYRILLIC.search(t["en"]):
+            cur["en"] = t["en"].strip()
+        levels = cur.setdefault("levels", {})
+        for x in t["levels"]:
+            if x["value"] in m["levels"] and x["en"].strip() and not _CYRILLIC.search(x["en"]):
+                levels[x["value"]] = x["en"].strip()
+    return terms
