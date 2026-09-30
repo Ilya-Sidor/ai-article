@@ -92,6 +92,12 @@ def test_starter_base_has_no_hardcoded_values(data_dir):
         assert p["fields"] == {} and s["status"] == "empty" and p["guidelines_url"].startswith("https://")
 
 
+def test_russian_journal_names_get_distinct_ids(data_dir):
+    a = journals.create("Вопросы онкологии")
+    b = journals.create("Онкопедиатрия")
+    assert (a["id"], b["id"]) == ("voprosy-onkologii", "onkopediatriya")
+
+
 def test_extraction_grounding_and_missing(journal, monkeypatch):
     from app import llm
     from app.journals import extract

@@ -156,6 +156,8 @@ tr:last-child td { border-bottom: none; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.missing { background: var(--neutral-soft); color: var(--muted); }
 td.problem { background: var(--danger-soft); color: var(--danger); }
+td.extracted { background: var(--accent-soft); }
+td.unverified { background: var(--warn-soft); }
 td.sticky, th.sticky { position: sticky; left: 0; background: var(--surface); z-index: 2; }
 th.sticky { z-index: 3; background: var(--surface-2); }
 td.editable { cursor: text; }

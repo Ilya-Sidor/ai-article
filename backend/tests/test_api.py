@@ -105,3 +105,10 @@ def test_meta_journal_suggestions_come_from_the_journal_base(api):
     assert "Архив патологии" in names and "Histopathology" in names
     api.post("/api/journals", json={"name": "My Local Journal", "publisher": "", "guidelines_url": ""})
     assert "My Local Journal" in [j["name"] for j in api.get("/api/meta").json()["journals"]]
+
+
+def test_interface_is_versioned_and_revalidated(api):
+    r = api.get("/")
+    assert r.status_code == 200 and 'src="app.js?v=' in r.text and 'href="styles.css?v=' in r.text
+    js = api.get("/app.js")
+    assert js.headers["cache-control"] == "no-cache" and api.get("/api/meta").headers["cache-control"] == "no-store"

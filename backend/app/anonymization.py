@@ -14,7 +14,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from .documents import DOC_TEXT_COLUMN
+
 MAX_REPORT_HITS = 2000
+# words of clinical documents the NER model sometimes takes for names ("Выписной эпикриз")
+NOT_NAMES = {"выписной", "выписка", "эпикриз", "заключение", "диагноз", "пациент", "пациентка", "больной", "больная",
+             "анамнез", "операция", "протокол", "макроскопически", "микроскопически", "гистологическое",
+             "иммуногистохимическое", "исследование", "материал", "препарат", "клинический", "рецидив", "метастаз"}
 
 
 def _norm(header: str) -> str:
@@ -121,7 +127,16 @@ def _rx(p, flags=0):
 
 
 CAP_RU = r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?"
-TEXT_RULES = [
+BIRTH_RULES = [  # before the date rules: a birth date must not become an interval (it would reveal the age)
+    Rule("birth_date", "Дата рождения",
+         _rx(r"(?:дат\w*\s+рождени\w*|д\.\s*р\.)\s*[:—–-]?\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", re.I),
+         "[ДАТА РОЖДЕНИЯ]"),
+    Rule("birth_date", "Год рождения",
+         _rx(r"(?<!\d)(?:19|20)\d{2}\s*г\.?\s*р\.?(?![а-яё])|год\w*\s+рождени\w*\s*[:—–-]?\s*(?:19|20)\d{2}", re.I),
+         "[ГОД РОЖДЕНИЯ]"),
+]
+
+TEXT_RULES = BIRTH_RULES + [
     Rule("email", "E-mail", _rx(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[EMAIL]"),
     Rule("snils", "СНИЛС", _rx(r"(?<!\d)\d{3}-\d{3}-\d{3}[\s-]\d{2}(?!\d)"), "[СНИЛС]"),
     Rule("passport", "Паспорт", _rx(r"паспорт\w*\s*[:№]?\s*\d{2}\s?\d{2}\s?№?\s?\d{6}", re.I), "[ПАСПОРТ]"),
@@ -202,6 +217,20 @@ class Anonymizer:
             table[key] = "%s-%04d" % (prefix, len(table) + 1)
         return table[key]
 
+    @staticmethod
+    def first_date(text):
+        """Index date of a free-text document (a discharge summary, a report): its first date that is not a
+        birth date. The other dates then become intervals, so the timeline (surgery → recurrence) survives."""
+        for rule in BIRTH_RULES:
+            text = rule.regex.sub(" ", text)
+        found = []
+        for kind, rx in (("iso", DATE_ISO), ("numeric", DATE_NUMERIC), ("ru", DATE_RU), ("en", DATE_EN)):
+            for m in rx.finditer(text):
+                d = _match_to_date(kind, m)
+                if d is not None:
+                    found.append((m.start(), d))
+        return min(found)[1] if found else None
+
     def scrub_text(self, text: str, column: str, row: int, index_date=None) -> str:
         out = str(text)
         for rule in TEXT_RULES:
@@ -232,6 +261,8 @@ class Anonymizer:
             return text
         spans = ner.entities(text)
         for start, end, etype, value in sorted(spans, reverse=True):
+            if etype == "PER" and all(w in NOT_NAMES for w in re.findall(r"[а-яё]+", value.lower())):
+                continue
             if etype == "PER":
                 self._hit("name_ner", "ФИО (NER)", column, row, value, "[ФИО]")
                 text = text[:start] + "[ФИО]" + text[end:]
@@ -317,6 +348,13 @@ class Anonymizer:
                 self.columns.append({"column": col, "action": "преобразована в интервал", "category": "direct",
                                      "detail": f"→ «{new_col}»" + ("" if index_col else " (индексная дата не найдена)")})
                 self.counts["date"] = self.counts.get("date", 0) + non_empty
+                continue
+            if col == DOC_TEXT_COLUMN and not index_col:  # a document: its own first date is the index date
+                doc_dates = [self.first_date(v) for v in df[col]]
+                if any(doc_dates):
+                    self.notes.append("Индексная дата документа — первая дата в тексте (кроме даты рождения); "
+                                      "остальные даты заменены интервалами в месяцах от неё (FR-1.4).")
+                out[col] = [self.scrub_text(v, col, r, idx) if v else "" for v, r, idx in zip(df[col], rows, doc_dates)]
                 continue
             out[col] = [self.scrub_text(v, col, r, idx) if v else "" for v, r, idx in zip(df[col], rows, index_dates)]
 

@@ -34,9 +34,15 @@ def read_table(filename: str, content: bytes) -> pd.DataFrame:
         if isinstance(data, dict):
             data = data.get("cases") or data.get("data") or [data]
         return pd.json_normalize(data).astype(str)
+    from .documents import DOCUMENT_EXT, DocumentError, read_document
+    if ext in DOCUMENT_EXT:
+        try:
+            return read_document(ext, content)
+        except DocumentError as exc:
+            raise UnsupportedFile(str(exc)) from exc
     raise UnsupportedFile(
-        f"формат {ext or '(без расширения)'} пока не поддерживается прототипом; "
-        "поддерживаются .xlsx, .csv, .tsv, .json (текстовые .docx/.pdf — в MVP)")
+        f"формат {ext or '(без расширения)'} не поддерживается; поддерживаются таблицы (.xlsx, .xls, .csv, .tsv, "
+        ".json) и документы (.docx, .doc, .pdf, .rtf, .txt)")
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +135,10 @@ def infer_variable(name: str, series: pd.Series) -> dict:
 
     uniq = sorted(set(present))
     lowered = {v: v.lower() for v in uniq}
+    # whole reports (even one or two of them) are free text; the text of an uploaded document always is
+    if name == "Текст документа" or np.mean([len(v) for v in present]) > 80:
+        spec.update(vtype="text", include=False)
+        return spec
 
     # binary: all values map to a positive/negative token
     if all(lowered[v] in POSITIVE | NEGATIVE for v in uniq) and {lowered[v] in POSITIVE for v in uniq} == {True, False}:

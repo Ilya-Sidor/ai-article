@@ -3,7 +3,7 @@ import uuid
 
 import pandas as pd
 
-from .anonymization import anonymize_frame
+from .anonymization import Anonymizer, anonymize_frame
 from .ingest import build_dictionary, prepare_analysis_frame, read_table
 from .storage import ProjectStore, now_iso, read_json, write_json
 
@@ -12,16 +12,33 @@ class DataError(ValueError):
     pass
 
 
+def safe_filename(filename: str, link_map: dict, upload_id: str) -> str:
+    """The name of the file is kept in the report and the provenance. A report of one patient is often saved
+    under the patient's name ("Смирнов.pdf") — a bare surname no detector can tell from a word — so documents
+    get a neutral name; the names of tables are anonymised like any text."""
+    from .documents import DOCUMENT_EXT
+    stem, dot, ext = filename.rpartition(".")
+    if not dot:
+        stem, ext = filename, ""
+    if f".{ext.lower()}" in DOCUMENT_EXT:
+        return f"документ-{upload_id}.{ext.lower()}"
+    clean = Anonymizer(filename, link_map).scrub_text(stem, "имя файла", 0)
+    return clean + (f".{ext}" if dot else "")
+
+
 def upload(store: ProjectStore, pid: str, filename: str, content: bytes) -> dict:
     raw = read_table(filename, content)
     if raw.empty:
         raise DataError("файл не содержит строк")
     link_map = store.link_map(pid)
+    upload_id = uuid.uuid4().hex[:8]
+    original_name, filename = filename, safe_filename(filename, link_map, upload_id)
     clean, report = anonymize_frame(raw, filename, link_map)
+    if filename != original_name:
+        report["notes"].append(f"Имя файла не сохраняется (может содержать ФИО): файл называется «{filename}».")
     store.save_link_map(pid, link_map)
     del raw  # the original never touches the disk
 
-    upload_id = uuid.uuid4().hex[:8]
     d = store.dir(pid) / "pending"
     store.save_frame(d / f"{upload_id}.csv", clean)
     report.update({"upload_id": upload_id, "uploaded_at": now_iso()})
@@ -131,6 +148,8 @@ def dataset_view(store: ProjectStore, pid: str) -> dict:
     return {
         "columns": list(df.columns), "rows": df.to_dict(orient="records"),
         "provenance": read_json(d / "provenance.json", {}), "problems": problems, "dictionary": dictionary,
+        "extracted": read_json(d / "extracted.json", {}), "conflicts": read_json(d / "extraction_conflicts.json", []),
+        "text_columns": [v["name"] for v in dictionary if v.get("vtype") == "text"],
     }
 
 
@@ -144,6 +163,9 @@ def edit_cell(store: ProjectStore, pid: str, case_id: str, column: str, value: s
     old = df.loc[mask, column].iloc[0]
     df.loc[mask, column] = value
     store.save_frame(store.dir(pid) / "dataset.csv", df)
+    extracted = read_json(store.dir(pid) / "extracted.json", {})
+    if extracted.get(case_id, {}).pop(column, None) is not None:  # checked by the author: no longer "from AI"
+        write_json(store.dir(pid) / "extracted.json", extracted)
     store.audit(pid, "author", "dataset.cell_edited", {"case_id": case_id, "column": column, "old": old, "new": value})
 
 

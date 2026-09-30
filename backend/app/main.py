@@ -97,7 +97,8 @@ async def security_headers(request: Request, call_next):
     response = await call_next(request)
     for k, v in SECURITY_HEADERS.items():
         if k == "Cache-Control" and not request.url.path.startswith("/api/"):
-            continue
+            # the interface itself: revalidate every time (ETag → 304), so an update reaches users at once
+            v = "no-cache"
         response.headers.setdefault(k, v)
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -292,6 +293,23 @@ def edit_cell(pid: str, body: CellEdit):
     return {"ok": True}
 
 
+class ExtractIn(BaseModel):
+    columns: List[str] = []
+
+
+@app.post("/api/projects/{pid}/dataset/extract")
+def extract_from_text(pid: str, body: ExtractIn):
+    """FR-1.7: features from the (anonymised) report texts; each value keeps its quote."""
+    from . import case_extraction
+    if store.dataset(pid) is None:
+        raise HTTPException(400, "сначала загрузите данные и подтвердите анонимизацию")
+    try:
+        summary = case_extraction.extract(store, pid, body.columns or None)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"summary": summary, **data_service.dataset_view(store, pid)}
+
+
 @app.get("/api/projects/{pid}/dataset/export.csv")
 def export_dataset(pid: str):
     path = store.dir(pid) / "dataset.csv"
@@ -436,5 +454,26 @@ app.include_router(ethics_api.router)
 # ---------------------------------------------------------------------------
 # Frontend
 # ---------------------------------------------------------------------------
+
+def _asset_version():
+    import hashlib
+    h = hashlib.sha256()
+    for f in sorted(FRONTEND_DIR.glob("*.*")):
+        if f.suffix in (".js", ".css"):
+            h.update(f.read_bytes())
+    return h.hexdigest()[:10]
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def index():
+    """The page links its scripts and styles with a content version (app.js?v=…), so after an update every
+    browser loads the new interface instead of a cached one."""
+    from fastapi.responses import HTMLResponse
+    v = _asset_version()
+    html = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+    html = re.sub(r'((?:src|href)=")([\w-]+\.(?:js|css))"', lambda m: f'{m.group(1)}{m.group(2)}?v={v}"', html)
+    return HTMLResponse(html)
+
 
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

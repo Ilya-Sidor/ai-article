@@ -53,7 +53,9 @@ def _dir(jid):
 
 
 def slugify(name):
-    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    """Profile id: ASCII, Russian names transliterated ("Вопросы онкологии" → "voprosy-onkologii")."""
+    from ..analysis.figures import latin
+    s = re.sub(r"[^a-z0-9]+", "-", latin(name.lower())).strip("-")
     return s[:60] or "journal"
 
 

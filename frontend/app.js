@@ -23,7 +23,7 @@ function el(tag, attrs, ...children) {
 }
 
 // Long operations run as background jobs (mirrors LONG_OPERATIONS in backend/app/jobs.py).
-const LONG_OPS = [/\/analysis\/run$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
+const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
   /\/literature\/sources\/[^/]+\/extract$/, /\/literature\/findings\/[^/]+\/compare$/, /\/literature\/ground$/,
   /\/literature\/retractions$/, /\/manuscript\/terms\/auto$/, /\/manuscript\/plan$/, /\/manuscript\/sections\/[^/]+\/generate$/,
   /\/manuscript\/sections\/[^/]+\/revise$/, /\/manuscript\/front\/generate$/, /\/cover\/generate$/, /\/cover\/revise$/,
@@ -309,7 +309,7 @@ async function viewProject(root, p) {
 
 async function viewData(root, p) {
   const { pending } = await api(`/projects/${p.id}/anonymization`);
-  const input = el("input", { type: "file", multiple: true, accept: ".xlsx,.xls,.csv,.tsv,.json", class: "hidden" });
+  const input = el("input", { type: "file", multiple: true, accept: ".xlsx,.xls,.csv,.tsv,.json,.docx,.doc,.pdf,.rtf,.txt", class: "hidden" });
   const upload = async (files) => {
     if (!files.length) return;
     const fd = new FormData();
@@ -327,7 +327,7 @@ async function viewData(root, p) {
       ondragleave: () => zone.classList.remove("drag"),
       ondrop: (e) => { e.preventDefault(); zone.classList.remove("drag"); upload(e.dataTransfer.files); } },
     el("h3", { text: "Перетащите файлы с данными серии или нажмите для выбора" }),
-    el("p", { class: "hint", text: "Прототип принимает .xlsx, .csv, .tsv, .json (строка = случай). Файлы разбираются на сервере; исходник не сохраняется, во внешние сервисы до вашего подтверждения ничего не передаётся." }));
+    el("p", { class: "hint", text: "Таблицы: .xlsx, .xls, .csv, .tsv, .json (строка = случай). Документы: .docx, .doc, .pdf, .rtf, .txt — таблица случаев внутри документа читается как таблица, текстовое заключение становится случаем (один файл = один случай), признаки из текста извлекаются на шаге «Структурирование» после подтверждения анонимизации. Файлы разбираются на сервере; исходник не сохраняется, во внешние сервисы до вашего подтверждения ничего не передаётся." }));
 
   const parts = [];
   if (!["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {
@@ -423,9 +423,28 @@ async function viewCases(root, p) {
   root.replaceChildren(tabs, body);
 }
 
+function extractionCard(p, ds) {
+  if (!(ds.text_columns || []).length) return null;
+  const run = el("button", { class: "primary small", text: "Извлечь признаки из текстов (ИИ)", disabled: !state.meta.llm.available });
+  run.addEventListener("click", () => busy(run, async () => {
+    const r = await api(`/projects/${p.id}/dataset/extract`, { json: { columns: [] } });
+    const s = r.summary;
+    toast(`Извлечено значений: ${s.values} (случаев: ${s.cases}); без подтверждающей цитаты: ${s.unverified}; конфликтов: ${s.conflicts.length}`);
+    route();
+  }));
+  const conflicts = (ds.conflicts || []).length ? el("details", {},
+    el("summary", { text: `Расхождения текста и таблицы: ${ds.conflicts.length} (в таблице оставлено исходное значение)` }),
+    el("ul", { class: "small" }, ds.conflicts.map((c) => el("li", { text: `${c.case_id} · ${c.column}: в таблице «${c.table}», в тексте «${c.text}» («${c.quote}»)` })))) : null;
+  return el("div", { class: "card stack" },
+    el("div", { class: "row" }, run, el("span", { class: "hint", text: `Текстовые столбцы: ${ds.text_columns.join(", ")}` })),
+    el("p", { class: "hint small", text: "ИИ раскладывает обезличенные заключения по признакам (локализация, размер, митозы, маркеры…). Каждое значение — с дословной цитатой из заключения: голубые ячейки — извлечены из текста (наведите, чтобы увидеть цитату), жёлтые — цитата не найдена в тексте, проверьте. Значения, которые уже есть в таблице, не перезаписываются. Двойной клик — исправить; исправленное вами значение больше не помечается как извлечённое ИИ." }),
+    conflicts);
+}
+
 function casesTable(p, ds) {
   const problems = new Map(ds.problems.map((x) => [`${x.case_id}|${x.column}`, x.issue]));
   const cols = ds.columns;
+  const textCols = new Set(ds.text_columns || []);
   const legend = el("div", { class: "row small" },
     el("span", { class: "badge", text: "— пропуск" }),
     el("span", { class: "badge danger", text: "не распознано / вне словаря" }),
@@ -439,11 +458,16 @@ function casesTable(p, ds) {
         return el("td", { class: "sticky mono", title: "Источник: " + src, text: r[c] });
       }
       const issue = problems.get(`${r.case_id}|${c}`);
-      const td = el("td", { class: "editable " + (issue ? "problem" : r[c] ? "" : "missing"), title: issue || r[c] || "", text: r[c] || "—" });
+      const ext = ((ds.extracted || {})[r.case_id] || {})[c];
+      const cls = issue ? "problem" : !r[c] ? "missing" : ext ? (ext.verified ? "extracted" : "unverified") : "";
+      const title = issue || (ext ? `Из текста (ИИ${ext.verified ? "" : ", цитата не найдена — проверьте"}): «${ext.quote}»` : r[c] || "");
+      const shown = textCols.has(c) && (r[c] || "").length > 90 ? r[c].slice(0, 90) + "…" : r[c];
+      const td = el("td", { class: "editable " + cls, title, text: shown || "—" });
       td.addEventListener("dblclick", () => editCell(p, td, r, c));
       return td;
     })))));
   return el("div", { class: "stack" },
+    extractionCard(p, ds),
     ds.problems.length ? el("div", { class: "banner warn", text: `Проблемных значений: ${ds.problems.length}. Они исключаются из анализа, пока не будут исправлены.` }) : null,
     legend, el("div", { class: "table-wrap" }, table));
 }

@@ -22,6 +22,7 @@ from .db import utcnow
 
 LONG_OPERATIONS = [
     (r"/analysis/run$", "Статистический анализ"),
+    (r"/dataset/extract$", "Извлечение признаков из заключений"),
     (r"/hypotheses$", "Проверка гипотезы"),
     (r"/findings/[^/]+/interpret$", "Интерпретация находки"),
     (r"/literature/identifiers$", "Загрузка источников"),
