@@ -16,7 +16,7 @@ from .literature import metadata as lit_metadata
 from .journals.store import JournalError
 from .manuscript.store import ManuscriptError
 from .literature.service import LiteratureError
-from .config import ARTICLE_TYPES, FRONTEND_DIR, MAX_UPLOAD_BYTES, STARTER_JOURNALS
+from .config import ARTICLE_TYPES, FRONTEND_DIR, MAX_UPLOAD_BYTES
 from .ingest import UnsupportedFile
 from .storage import NotFound, ProjectStore, read_bytes, read_json
 
@@ -167,7 +167,10 @@ async def _llm(_: Request, exc: Exception):
 
 @app.get("/api/meta")
 def meta():
-    return {"journals": STARTER_JOURNALS, "article_types": ARTICLE_TYPES, "llm": llm.status()}
+    from .journals import store as journals
+    journals.seed()  # the suggestions come from the journal base, so new and custom journals appear too
+    return {"journals": [{"name": j["name"], "publisher": j["publisher"]} for j in journals.list_profiles()],
+            "article_types": ARTICLE_TYPES, "llm": llm.status()}
 
 
 # ---------------------------------------------------------------------------

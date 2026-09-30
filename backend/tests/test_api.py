@@ -98,3 +98,10 @@ def test_failed_run_does_not_block_next_run(api):
     stale.mkdir(parents=True)  # left behind by a crashed run
     res = api.post(f"/api/projects/{pid}/analysis/run")
     assert res.status_code == 200 and res.json()["summary"]["run_id"] == "R-0002"
+
+
+def test_meta_journal_suggestions_come_from_the_journal_base(api):
+    names = [j["name"] for j in api.get("/api/meta").json()["journals"]]
+    assert "Архив патологии" in names and "Histopathology" in names
+    api.post("/api/journals", json={"name": "My Local Journal", "publisher": "", "guidelines_url": ""})
+    assert "My Local Journal" in [j["name"] for j in api.get("/api/meta").json()["journals"]]

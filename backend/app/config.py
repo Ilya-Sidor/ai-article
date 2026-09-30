@@ -13,15 +13,6 @@ ANALYSIS_SEED = int(os.environ.get("AI_ARTICLE_SEED", "20260927"))
 ANALYSIS_TIMEOUT_S = int(os.environ.get("AI_ARTICLE_ANALYSIS_TIMEOUT", "600"))
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
-STARTER_JOURNALS = [
-    {"name": "Virchows Archiv", "publisher": "Springer"},
-    {"name": "Modern Pathology", "publisher": "Elsevier (USCAP)"},
-    {"name": "Histopathology", "publisher": "Wiley"},
-    {"name": "The American Journal of Surgical Pathology", "publisher": "Wolters Kluwer"},
-    {"name": "The Journal of Pathology", "publisher": "Wiley"},
-    {"name": "Pathology", "publisher": "Elsevier (RCPA)"},
-    {"name": "Diagnostic Pathology", "publisher": "BMC (Springer Nature)"},
-]
 
 ARTICLE_TYPES = {
     "original_article": "Original article",
