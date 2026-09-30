@@ -4,12 +4,12 @@ import re
 import zipfile
 from typing import List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import admin_api, auth, cover_api, data_service, ethics_api, jobs, journals_api, literature_api, llm, manuscript_api
+from . import admin_api, auth, chunks, cover_api, data_service, ethics_api, jobs, journals_api, literature_api, llm, manuscript_api
 from .storage import encrypt_existing
 from .analysis import engine, figures
 from .literature import metadata as lit_metadata
@@ -240,16 +240,23 @@ def audit(pid: str):
 # Data: upload → anonymization report → confirm (Module 1)
 # ---------------------------------------------------------------------------
 
+@app.post("/api/chunks")
+async def upload_chunk(request: Request, upload_id: str, index: int, total: int, name: str = "upload"):
+    """One part of a large file (see chunks.py); the file itself is then sent as a ref."""
+    return chunks.put(request.state.user["id"], upload_id, index, total, name[:200], await request.body())
+
+
 @app.post("/api/projects/{pid}/uploads")
-async def upload(pid: str, files: List[UploadFile] = File(...)):
+async def upload(pid: str, request: Request, files: List[UploadFile] = File(default=[]), refs: str = Form("")):
     store.get(pid)
     reports = []
-    for f in files:
-        content = await f.read(MAX_UPLOAD_BYTES + 1)
+    for name, content in await chunks.collect(request, files, refs, MAX_UPLOAD_BYTES):
         if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"файл {f.filename} больше 20 МБ")
+            raise HTTPException(413, f"файл {name} больше 20 МБ")
         # parsing, anonymisation and NER are CPU-bound: off the event loop, so other users are not blocked
-        reports.append(await run_in_threadpool(data_service.upload, store, pid, f.filename or "upload", content))
+        reports.append(await run_in_threadpool(data_service.upload, store, pid, name, content))
+    if not reports:
+        raise HTTPException(400, "нет файлов")
     return reports
 
 

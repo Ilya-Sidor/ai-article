@@ -4,6 +4,7 @@ from typing import Dict, Optional
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from . import chunks
 from .config import ARTICLE_TYPES as PROJECT_ARTICLE_TYPES
 from .journals import checks, extract, store as journals
 from .journals.schema import ARTICLE_TYPES, FIELDS, REQ_LABELS
@@ -112,9 +113,13 @@ def source_text(jid: str, body: TextIn):
 
 
 @router.post("/journals/{jid}/sources/pdf")
-async def source_pdf(jid: str, file: UploadFile = File(...), replaces: Optional[str] = Form(None)):
-    content = await file.read(30 * 1024 * 1024)
-    return journals.add_source(jid, "pdf", content=content, filename=file.filename, replaces=replaces or None)
+async def source_pdf(jid: str, request: Request, file: Optional[UploadFile] = File(None), refs: str = Form(""),
+                     replaces: Optional[str] = Form(None)):
+    got = await chunks.collect(request, [file] if file else [], refs, 30 * 1024 * 1024)
+    if not got:
+        raise HTTPException(400, "нет файла")
+    filename, content = got[0]
+    return journals.add_source(jid, "pdf", content=content, filename=filename, replaces=replaces or None)
 
 
 @router.get("/journals/{jid}/sources/{sid}")

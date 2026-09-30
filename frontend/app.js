@@ -37,7 +37,7 @@ async function rawApi(path, opts = {}) {
     init.method = init.method || "POST";
   }
   // the public tunnel reconnects now and then; a read that hits the gap is simply repeated
-  const safe = !init.method || init.method.toUpperCase() === "GET";
+  const safe = !init.method || init.method.toUpperCase() === "GET" || opts.retry;
   let res;
   for (let attempt = 0; ; attempt++) {
     try { res = await fetch("/api" + path, init); break; } catch (e) {
@@ -83,6 +83,29 @@ async function api(path, opts = {}) {
     return r;
   }
   return rawApi(path, opts);
+}
+
+// The public tunnel drops request bodies over ~1 MB: larger files go in parts, then as refs (backend/app/chunks.py).
+const CHUNK = 512 * 1024;
+
+async function sendFiles(path, files, { field = "files", extra = {}, onProgress } = {}) {
+  const fd = new FormData();
+  const refs = [];
+  for (const f of files) {
+    if (f.size <= CHUNK) { fd.append(field, f); continue; }
+    const id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^a-z0-9-]/gi, "");
+    const total = Math.ceil(f.size / CHUNK);
+    for (let i = 0; i < total; i++) {
+      // a part is idempotent, so a part lost in a tunnel reconnect is simply sent again
+      await rawApi(`/chunks?upload_id=${id}&index=${i}&total=${total}&name=${encodeURIComponent(f.name)}`,
+        { method: "POST", body: f.slice(i * CHUNK, (i + 1) * CHUNK), headers: { "Content-Type": "application/octet-stream" }, retry: true });
+      if (onProgress) onProgress(f.name, i + 1, total);
+    }
+    refs.push(id);
+  }
+  if (refs.length) fd.append("refs", JSON.stringify(refs));
+  for (const [k, v] of Object.entries(extra)) fd.append(k, v);
+  return api(path, { method: "POST", body: fd });
 }
 
 function toast(message, kind) {
@@ -320,11 +343,11 @@ async function viewData(root, p) {
   const input = el("input", { type: "file", multiple: true, accept: ".xlsx,.xls,.csv,.tsv,.json,.docx,.doc,.pdf,.rtf,.txt", class: "hidden" });
   const upload = async (files) => {
     if (!files.length) return;
-    const fd = new FormData();
-    for (const f of files) fd.append("files", f);
-    zone.replaceChildren(el("span", { class: "spinner" }), " Загрузка и локальная анонимизация…");
+    const status = el("span", { text: " Загрузка и локальная анонимизация…" });
+    zone.replaceChildren(el("span", { class: "spinner" }), status);
     try {
-      await api(`/projects/${p.id}/uploads`, { method: "POST", body: fd });
+      await sendFiles(`/projects/${p.id}/uploads`, [...files], {
+        onProgress: (name, i, n) => { status.textContent = ` Передача «${name}»: ${Math.round(100 * i / n)}%`; } });
       toast("Файл обработан — проверьте отчёт об анонимизации");
     } catch (e) { toast(e.message, "error"); }
     route();

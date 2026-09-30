@@ -71,8 +71,7 @@ async function renderJournal(app, jid) {
   const pdfInput = el("input", { type: "file", accept: ".pdf", class: "hidden" });
   const pdfBtn = el("button", { class: "small", text: "Загрузить PDF страницы", onclick: () => pdfInput.click() });
   pdfInput.addEventListener("change", () => busy(pdfBtn, async () => {
-    const fd = new FormData(); fd.append("file", pdfInput.files[0]);
-    await api(`/journals/${jid}/sources/pdf`, { method: "POST", body: fd });
+    await sendFiles(`/journals/${jid}/sources/pdf`, [pdfInput.files[0]], { field: "file" });
     reload();
   }));
   const urlBtn = el("button", { class: "small", text: "Загрузить по URL", disabled: !p.guidelines_url });
@@ -98,8 +97,7 @@ async function renderJournal(app, jid) {
           try {
             let r;
             if (f.name.toLowerCase().endsWith(".pdf")) {
-              const fd = new FormData(); fd.append("file", f); fd.append("replaces", src.id);
-              r = await api(`/journals/${jid}/sources/pdf`, { method: "POST", body: fd });
+              r = await sendFiles(`/journals/${jid}/sources/pdf`, [f], { field: "file", extra: { replaces: src.id } });
             } else {
               r = await api(`/journals/${jid}/sources/text`, { json: { text: await f.text(), replaces: src.id, url: src.url } });
             }

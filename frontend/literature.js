@@ -63,10 +63,12 @@ async function litSources(body, p, data, reload) {
     el("strong", { text: "PDF статей" }), el("div", { class: "hint", text: "перетащите или нажмите; DOI ищется в тексте и сверяется с Crossref" }));
   const uploadPdf = async (files) => {
     if (!files.length) return;
-    const fd = new FormData();
-    for (const f of files) fd.append("files", f);
-    drop.replaceChildren(el("span", { class: "spinner" }), " Разбор PDF и сверка метаданных…");
-    try { report(await api(`/projects/${p.id}/literature/pdf`, { method: "POST", body: fd })); }
+    const status = el("span", { text: " Передача PDF…" });
+    drop.replaceChildren(el("span", { class: "spinner" }), status);
+    try {
+      report(await sendFiles(`/projects/${p.id}/literature/pdf`, [...files], {
+        onProgress: (name, i, n) => { status.textContent = i < n ? ` Передача «${name}»: ${Math.round(100 * i / n)}%` : " Разбор PDF и сверка метаданных…"; } }));
+    }
     catch (e) { toast(e.message, "error"); reload(); }
   };
   pdfInput.addEventListener("change", () => uploadPdf(pdfInput.files));

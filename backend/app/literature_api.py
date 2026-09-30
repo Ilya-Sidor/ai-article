@@ -1,12 +1,12 @@
 """REST API of the literature module (Module 3)."""
 from typing import List, Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from . import llm
+from . import chunks, llm
 from .analysis import engine
 from .literature import agent, metadata as md, service as lit
 from .literature import styles as csl_styles
@@ -81,18 +81,17 @@ def overview(pid: str):
 
 
 @router.post("/projects/{pid}/literature/pdf")
-async def upload_pdf(pid: str, files: List[UploadFile] = File(...)):
+async def upload_pdf(pid: str, request: Request, files: List[UploadFile] = File(default=[]), refs: str = Form("")):
     store.get(pid)
     added, errors = [], []
-    for f in files:
-        content = await f.read(md.MAX_PDF_BYTES + 1)
+    for name, content in await chunks.collect(request, files, refs, md.MAX_PDF_BYTES):
         if len(content) > md.MAX_PDF_BYTES:
-            errors.append({"file": f.filename, "error": "файл больше 40 МБ"})
+            errors.append({"file": name, "error": "файл больше 40 МБ"})
             continue
         try:  # PDF parsing and Crossref/PubMed lookups block: off the event loop
-            added.append(await run_in_threadpool(lit.add_pdf, store, pid, f.filename or "paper.pdf", content))
+            added.append(await run_in_threadpool(lit.add_pdf, store, pid, name or "paper.pdf", content))
         except lit.LiteratureError as exc:
-            errors.append({"file": f.filename, "error": str(exc)})
+            errors.append({"file": name, "error": str(exc)})
     return {"added": added, "errors": errors}
 
 
