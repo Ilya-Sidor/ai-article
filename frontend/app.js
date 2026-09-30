@@ -23,7 +23,7 @@ function el(tag, attrs, ...children) {
 }
 
 // Long operations run as background jobs (mirrors LONG_OPERATIONS in backend/app/jobs.py).
-const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
+const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/literature\/pdf$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
   /\/literature\/sources\/[^/]+\/extract$/, /\/literature\/findings\/[^/]+\/compare$/, /\/literature\/ground$/,
   /\/literature\/retractions$/, /\/manuscript\/terms\/auto$/, /\/manuscript\/plan$/, /\/manuscript\/sections\/[^/]+\/generate$/,
   /\/manuscript\/sections\/[^/]+\/revise$/, /\/manuscript\/front\/generate$/, /\/cover\/generate$/, /\/cover\/revise$/,
@@ -36,7 +36,15 @@ async function rawApi(path, opts = {}) {
     init.headers["Content-Type"] = "application/json";
     init.method = init.method || "POST";
   }
-  const res = await fetch("/api" + path, init);
+  // the public tunnel reconnects now and then; a read that hits the gap is simply repeated
+  const safe = !init.method || init.method.toUpperCase() === "GET";
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    try { res = await fetch("/api" + path, init); break; } catch (e) {
+      if (!safe || attempt >= 3) throw new Error("нет связи с сервером — проверьте интернет и повторите");
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    }
+  }
   if (res.status === 401 && !path.startsWith("/auth/")) {
     state.user = null;
     if (!location.hash.startsWith("#/login")) location.hash = "#/login";

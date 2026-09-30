@@ -22,6 +22,7 @@ from .db import utcnow
 
 LONG_OPERATIONS = [
     (r"/analysis/run$", "Статистический анализ"),
+    (r"/literature/pdf$", "Загрузка PDF статей"),
     (r"/dataset/extract$", "Извлечение признаков из заключений"),
     (r"/hypotheses$", "Проверка гипотезы"),
     (r"/findings/[^/]+/interpret$", "Интерпретация находки"),
@@ -52,6 +53,22 @@ def long_label(method, path):
         if re.search(pattern, path):
             return label
     return None
+
+
+def encode_body(raw: bytes) -> str:
+    """Request bodies are stored as text; file uploads (multipart, binary) go base64-encoded."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        import base64
+        return "b64:" + base64.b64encode(raw).decode("ascii")
+
+
+def _decode_body(body):
+    if body and body.startswith("b64:"):
+        import base64
+        return base64.b64decode(body[4:])
+    return (body or "").encode("utf-8")
 
 
 def enqueue(user, project_id, label, method, path, body, content_type):
@@ -115,7 +132,7 @@ def run_one(app):
     if j["content_type"]:
         headers["content-type"] = j["content_type"]
     try:
-        r = client.request(j["method"], j["path"], content=(j["body"] or "").encode("utf-8"), headers=headers)
+        r = client.request(j["method"], j["path"], content=_decode_body(j["body"]), headers=headers)
         ok = r.status_code < 400
         detail = None
         if not ok:
@@ -129,6 +146,7 @@ def run_one(app):
                   "result": r.text if ok else None, "error": None if ok else str(detail)}
     except Exception as exc:  # the job must always finish
         values = {"status": "error", "status_code": 500, "finished_at": utcnow(), "error": f"внутренняя ошибка: {exc}"}
+    values["body"] = None  # the request (possibly uploaded files) is not kept once the job is done
     with db.engine().begin() as c:
         c.execute(db.jobs.update().where(db.jobs.c.id == j["id"]).values(**values))
     return True

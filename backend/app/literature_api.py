@@ -4,6 +4,7 @@ from typing import List, Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from . import llm
 from .analysis import engine
@@ -88,8 +89,8 @@ async def upload_pdf(pid: str, files: List[UploadFile] = File(...)):
         if len(content) > md.MAX_PDF_BYTES:
             errors.append({"file": f.filename, "error": "файл больше 40 МБ"})
             continue
-        try:
-            added.append(lit.add_pdf(store, pid, f.filename or "paper.pdf", content))
+        try:  # PDF parsing and Crossref/PubMed lookups block: off the event loop
+            added.append(await run_in_threadpool(lit.add_pdf, store, pid, f.filename or "paper.pdf", content))
         except lit.LiteratureError as exc:
             errors.append({"file": f.filename, "error": str(exc)})
     return {"added": added, "errors": errors}

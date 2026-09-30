@@ -22,6 +22,8 @@ from .storage import NotFound, ProjectStore, read_bytes, read_json
 
 from contextlib import asynccontextmanager  # noqa: E402
 
+from starlette.concurrency import run_in_threadpool  # noqa: E402
+
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -62,7 +64,6 @@ async def access_control(request: Request, call_next):
         return _deny(403, "запрос отклонён (CSRF)")
     if path in PUBLIC or path.startswith("/api/auth/invite/"):
         return await call_next(request)
-    from starlette.concurrency import run_in_threadpool
     user = await run_in_threadpool(auth.user_from_request, request)
     if not user:
         return _deny(401, "требуется вход")
@@ -84,7 +85,7 @@ async def access_control(request: Request, call_next):
             return _deny(*denied)
     label = jobs.long_label(request.method, path)
     if label and request.query_params.get("async") == "1":
-        body = (await request.body()).decode("utf-8", errors="replace")
+        body = jobs.encode_body(await request.body())
         jid = await run_in_threadpool(jobs.enqueue, user, project_id, label, request.method, path, body,
                                       request.headers.get("content-type"))
         return JSONResponse({"job_id": jid, "label": label}, status_code=202)
@@ -247,7 +248,8 @@ async def upload(pid: str, files: List[UploadFile] = File(...)):
         content = await f.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(413, f"файл {f.filename} больше 20 МБ")
-        reports.append(data_service.upload(store, pid, f.filename or "upload", content))
+        # parsing, anonymisation and NER are CPU-bound: off the event loop, so other users are not blocked
+        reports.append(await run_in_threadpool(data_service.upload, store, pid, f.filename or "upload", content))
     return reports
 
 

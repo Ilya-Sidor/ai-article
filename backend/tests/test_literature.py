@@ -391,3 +391,23 @@ def test_grobid_blocks_used_when_configured(api, fake_http, monkeypatch):
     pid2 = api.post("/api/projects", json={"title": "g2"}).json()["id"]
     src2 = api.post(f"/api/projects/{pid2}/literature/pdf", files={"files": ("p.pdf", make_pdf())}).json()["added"][0]
     assert src2["fulltext"]["parser"] == "pypdf"  # graceful fallback
+
+
+def test_pdf_upload_as_background_job(api, fake_http):
+    """Regression: a PDF upload waited for Crossref/PubMed inside the request; behind the public tunnel the
+    browser gave up ("Load failed"). The upload is now a job; the binary body survives the queue and is not kept."""
+    from app import db, jobs, main
+    pid = _project(api)
+    pdf = make_pdf()
+    r = api.post(f"/api/projects/{pid}/literature/pdf?async=1", files={"files": ("paper.pdf", pdf)})
+    assert r.status_code == 202 and r.json()["label"] == "Загрузка PDF статей"
+    jid = r.json()["job_id"]
+    assert jobs.run_one(main.app)
+    j = api.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "done", j
+    src = j["result"]["added"][0]
+    assert src["doi"] == DOI and src["n_chunks"] >= 3
+    stored = api.get(f"/api/projects/{pid}/literature/sources/{src['id']}/file.pdf")
+    assert stored.status_code == 200 and stored.content == pdf  # the file arrived byte for byte
+    with db.engine().connect() as c:
+        assert c.execute(db.jobs.select().where(db.jobs.c.id == jid)).mappings().first()["body"] is None
