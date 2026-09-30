@@ -61,7 +61,7 @@ def _view(pid):
     if not ab or ab["status"] != "accepted":
         prereq.append("примите Abstract (шаг 7)")
     not_acc = [s["heading"] for s in ms.ordered(state) if s["status"] != "accepted"]
-    letter = cv.assemble(cover, renderer.text(cur["body"]), ctx.get("journal")) if cur else []
+    letter = cv.assemble(cover, renderer.text(cur["body"]), ctx.get("journal"), ctx.get("lang", "en")) if cur else []
     return {
         "settings": cover["settings"], "status": cover["status"], "confirmed": cover.get("confirmed", {}),
         "body": cur["body"] if cur else "", "segments": renderer.segments(cur["body"]) if cur else [],
@@ -217,7 +217,7 @@ def letter_docx(pid, draft=True):
     if not cur:
         return None
     renderer = _renderer(pid, ctx, state)
-    return cv.docx_bytes(cv.assemble(cover, renderer.text(cur["body"]), ctx.get("journal")), draft)
+    return cv.docx_bytes(cv.assemble(cover, renderer.text(cur["body"]), ctx.get("journal"), ctx.get("lang", "en")), draft)
 
 
 @router.get("/projects/{pid}/cover/letter.docx")

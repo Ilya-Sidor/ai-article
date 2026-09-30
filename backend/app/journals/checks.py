@@ -51,7 +51,9 @@ def template(profile, article_type):
         "title": {"max_chars": value(profile, "title.max_chars"), "max_words": value(profile, "title.max_words")},
         "keywords": {"min": value(profile, "keywords.min"), "max": value(profile, "keywords.max"),
                      "mesh": value(profile, "keywords.mesh")},
-        "language_variant": need("language_variant", value(profile, "language_variant")),
+        "language": value(profile, "language") or "en",
+        "language_variant": (need("language_variant", value(profile, "language_variant"))
+                             if value(profile, "language") != "ru" else None),
         "tone": value(profile, "tone"),
         "citation": {"style_name": value(profile, "citation.style_name"), "in_text": value(profile, "citation.in_text"),
                      "csl_id": value(profile, "citation.csl_id")},

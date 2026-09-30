@@ -64,12 +64,46 @@ def ai_statement(pid):
         "listed as an author.")
 
 
+# CRediT roles → the contribution categories Russian journals ask for («Участие авторов»)
+CREDIT_RU = [("Концепция и дизайн исследования", ("Conceptualization", "Methodology")),
+             ("Сбор и обработка материала", ("Data curation", "Investigation", "Resources")),
+             ("Статистическая обработка данных", ("Formal analysis", "Software", "Validation")),
+             ("Написание текста", ("Writing – original draft", "Visualization")),
+             ("Редактирование", ("Writing – review & editing", "Supervision", "Project administration"))]
+
+
+def ai_statement_ru(pid):
+    """«Использование инструментов ИИ» по четырём пунктам, которые требуют российские журналы."""
+    used = ai_usage(pid)
+    models = sorted({m for ms in used.values() for m in ms})
+    try:
+        scipy_v = metadata.version("scipy")
+    except metadata.PackageNotFoundError:
+        scipy_v = "?"
+    tool = f"приложения AI Article на основе больших языковых моделей ({', '.join(models)})" if models else ""
+    text_used = [p for p in ("plan", "section", "revise", "front") if p in used]
+    lit_used = [p for p in ("compare_finding", "verify_citation", "ground_text", "extract_source") if p in used]
+    return " ".join([
+        "При статистической обработке данных ИИ не использовался: все расчёты выполнены воспроизводимым кодом "
+        f"Python (SciPy {scipy_v}), скрипт анализа прилагается.",
+        (f"При написании текста статьи использовались языковые модели {tool} (план, черновики разделов и правка "
+         "текста по указаниям авторов); авторы проверили и отредактировали весь текст и несут за него полную "
+         "ответственность." if text_used else "При написании текста статьи ИИ не использовался."),
+        "Для создания таблиц и графиков ИИ не использовался: они построены программно из результатов анализа.",
+        (f"При формировании списка литературы языковые модели ({', '.join(models)}) использовались для поиска "
+         "фрагментов источников и проверки соответствия цитат их тексту; оформление списка выполнено программно "
+         "(стиль CSL)." if lit_used else "Для формирования и форматирования списка литературы ИИ не использовался."),
+    ])
+
+
 def _todo(what):
     return f"[уточнить: {what}]"
 
 
-def build(pid, inputs, template):
+def build(pid, inputs, template, lang="en"):
     """Source text of the Statements section (### headings)."""
+    if lang == "ru":
+        return build_ru(pid, inputs, template)
     req = {s["key"]: s["requirement"] for s in (template or {}).get("statements", [])}
 
     def wanted(key):
@@ -118,4 +152,63 @@ def build(pid, inputs, template):
         parts.append(("Acknowledgements", inputs["acknowledgements"]))
     if wanted("ai_disclosure"):
         parts.append(("Declaration of generative AI use", ai_statement(pid)))
+    return "\n\n".join(f"### {h}\n\n{b}" for h, b in parts)
+
+
+def build_ru(pid, inputs, template):
+    """«Дополнительная информация» русскоязычной статьи."""
+    req = {s["key"]: s["requirement"] for s in (template or {}).get("statements", [])}
+
+    def wanted(key):
+        return req.get(key) in (None, "required", "recommended", "optional")
+
+    parts = []
+    e = inputs.get("ethics") or {}
+    if wanted("ethics"):
+        if e.get("waiver"):
+            body = f"Необходимость одобрения этическим комитетом отменена: {e.get('committee') or _todo('комитет')}"
+            body += f" ({e['approval_number']})." if e.get("approval_number") else "."
+        elif e.get("committee"):
+            body = (f"Исследование одобрено: {e['committee']} (протокол № "
+                    f"{e.get('approval_number') or _todo('номер одобрения')}"
+                    + (f" от {e['approval_date']}" if e.get("approval_date") else "") + "). Исследование выполнено "
+                    "в соответствии с Хельсинкской декларацией.")
+        else:
+            body = _todo("этический комитет и номер одобрения или отмена одобрения")
+        parts.append(("Соответствие принципам этики", body))
+    c = inputs.get("consent") or {}
+    if wanted("consent"):
+        body = {"written": "Получено письменное информированное согласие пациентов на публикацию.",
+                "waived": "Информированное согласие не требовалось: ретроспективное исследование обезличенного "
+                          "архивного материала.",
+                "not_applicable": "Не применимо."}.get(c.get("status"), _todo("информированное согласие"))
+        if c.get("details"):
+            body += " " + c["details"]
+        parts.append(("Информированное согласие", body))
+    if wanted("coi"):
+        parts.append(("Конфликт интересов", inputs.get("coi") or _todo("конфликт интересов (или «Авторы заявляют "
+                                                                         "об отсутствии конфликта интересов»)")))
+    if wanted("funding"):
+        parts.append(("Финансирование", inputs.get("funding") or _todo("финансирование (или «Исследование не "
+                                                                      "имело спонсорской поддержки»)")))
+    if wanted("data_availability"):
+        parts.append(("Доступность данных", inputs.get("data_availability") or
+                      "Обезличенные данные и скрипт анализа доступны у автора, ответственного за переписку, "
+                      "по обоснованному запросу."))
+    if wanted("author_contributions"):
+        authors = inputs.get("authors") or []
+        if authors:
+            lines = []
+            for label, roles in CREDIT_RU:
+                names = [a["name"] for a in authors if set(a.get("roles") or []) & set(roles)]
+                if names:
+                    lines.append(f"{label} — {', '.join(names)}.")
+            body = "\n".join(lines) or _todo("роли авторов")
+        else:
+            body = _todo("авторы и их участие")
+        parts.append(("Участие авторов", body))
+    if wanted("acknowledgements") and inputs.get("acknowledgements"):
+        parts.append(("Благодарности", inputs["acknowledgements"]))
+    if wanted("ai_disclosure"):
+        parts.append(("Использование инструментов ИИ", ai_statement_ru(pid)))
     return "\n\n".join(f"### {h}\n\n{b}" for h, b in parts)

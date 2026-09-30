@@ -21,6 +21,8 @@ REQ_LABELS = {"required": "обязательно", "recommended": "рекоме
 # (path, type, label, group, hint for the extractor)
 GLOBAL_FIELDS = [
     ("scope", "text", "Scope и аудитория", "Общее", "journal aims and scope in one or two sentences"),
+    ("language", "enum:en|ru", "Язык статьи", "Общее",
+     "language the manuscript must be written in: ru for Russian-language journals, otherwise en"),
     ("language_variant", "enum:UK|US", "Вариант английского", "Общее", "British or American spelling if specified"),
     ("tone", "text", "Тон / профиль журнала", "Общее",
      "clinico-diagnostic vs molecular-mechanistic focus, as stated or evident from scope"),

@@ -25,7 +25,7 @@ function viewDraftRender(root, p, m, reloadArg) {
   const lim = m.template?.limits || {};
   const counters = el("div", { class: "row small", style: "gap:14px" },
     el("span", {}, "Основной текст: ", el("strong", { text: `${c.words ?? 0}` }), ` / ${lim.words_total ?? "—"} слов`),
-    el("span", {}, "Abstract: ", el("strong", { text: `${c.abstract_words ?? 0}` }), ` / ${m.template?.abstract?.words ?? "—"}`),
+    el("span", {}, m.lang === "ru" ? "Резюме: " : "Abstract: ", el("strong", { text: `${c.abstract_words ?? 0}` }), ` / ${m.template?.abstract?.words ?? "—"}`),
     el("span", { text: `Таблиц: ${c.tables ?? 0} · рисунков: ${c.figures ?? 0} · ссылок: ${c.references ?? 0}` }),
     el("span", { class: "badge " + (m.blocking ? "danger" : "ok"), text: m.blocking ? `блокирующих замечаний: ${m.blocking}` : "блокирующих замечаний нет" }));
   const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront }[state.msTab](p, m, reload);
@@ -180,14 +180,16 @@ function msAssets(p, m, reload) {
   const row = (it, kind) => {
     const inc = el("input", { type: "checkbox", checked: it.include, onchange: (e) => { it.include = e.target.checked; } });
     const cap = el("input", { value: it.caption || "", placeholder: it.caption_effective, onchange: (e) => { it.caption = e.target.value; } });
+    const capEn = m.lang === "ru" ? el("input", { value: it.caption_en || "", placeholder: it.caption_en_effective || "English caption",
+      style: "margin-top:4px", onchange: (e) => { it.caption_en = e.target.value; } }) : null;
     return el("tr", {}, el("td", {}, inc), el("td", { class: "mono small", text: `{{${kind}:${it.id}}}` }),
-      el("td", { class: "small", text: it.kind }), el("td", { style: "min-width:340px" }, cap),
+      el("td", { class: "small", text: it.kind }), el("td", { style: "min-width:340px" }, cap, capEn),
       kind === "FIG" ? el("td", {}, el("a", { href: `/api/projects/${p.id}/manuscript/figures/${it.id}.png?lang=${m.figure_language || "en"}`, target: "_blank", text: "просмотр" })) : el("td", {}));
   };
   const save = el("button", { class: "primary", text: "Сохранить" });
   save.addEventListener("click", () => busy(save, async () => reload(await api(`/projects/${p.id}/manuscript/assets`, { method: "PUT", json: { tables, figures, figure_language: figureLanguage } }))));
   const tbl = (items, kind) => el("div", { class: "table-wrap" }, el("table", {},
-    el("thead", {}, el("tr", {}, ["В статье", "Ссылка в тексте", "Тип", "Подпись (пусто — по умолчанию)", ""].map((h) => el("th", { text: h })))),
+    el("thead", {}, el("tr", {}, ["В статье", "Ссылка в тексте", "Тип", m.lang === "ru" ? "Подпись RU / EN (пусто — по умолчанию)" : "Подпись (пусто — по умолчанию)", ""].map((h) => el("th", { text: h })))),
     el("tbody", {}, items.map((it) => row(it, kind)))));
   return el("div", { class: "stack" },
     el("div", { class: "card stack" }, el("h3", { text: "Таблицы (FR-5.6)" }),
@@ -343,16 +345,26 @@ function msFront(p, m, reload) {
   const running = el("input", { value: f.running_title || "" });
   const kw = el("input", { value: (f.keywords || []).join("; ") });
   const hl = el("textarea", {}, (f.highlights || []).join("\n"));
+  const ru = m.lang === "ru";  // a Russian article carries its title and keywords in English too
+  const titleEn = el("input", { value: f.title_en || "", placeholder: "Title in English" });
+  const kwEn = el("input", { value: (f.keywords_en || []).join("; ") });
   const save = el("button", { class: "primary", text: "Сохранить" });
   save.addEventListener("click", () => busy(save, async () => reload(await api(`/projects/${p.id}/manuscript/front`, { method: "PUT",
-    json: { title: title.value, running_title: running.value, keywords: kw.value.split(";"), highlights: hl.value.split("\n") } }))));
+    json: { title: title.value, running_title: running.value, keywords: kw.value.split(";"), highlights: hl.value.split("\n"),
+      ...(ru ? { title_en: titleEn.value, keywords_en: kwEn.value.split(";") } : {}) } }))));
+  const candidatesEn = f.title_candidates_en || [];
   return el("div", { class: "card stack" },
     el("div", { class: "row" }, gen, el("span", { class: "hint", text: "Варианты строятся по принятым разделам (Title → 3–5 вариантов)." })),
-    (f.title_candidates || []).length ? el("div", {}, el("h4", { text: "Варианты названия" }), f.title_candidates.map((t) =>
-      el("div", { class: "row small", style: "flex-wrap:nowrap" }, el("button", { class: "small", text: "выбрать", onclick: () => { title.value = t; title.dispatchEvent(new Event("input")); } }), t))) : null,
+    (f.title_candidates || []).length ? el("div", {}, el("h4", { text: "Варианты названия" }), f.title_candidates.map((t, i) =>
+      el("div", { class: "row small", style: "flex-wrap:nowrap" }, el("button", { class: "small", text: "выбрать", onclick: () => {
+        title.value = t; title.dispatchEvent(new Event("input"));
+        if (ru && candidatesEn[i]) titleEn.value = candidatesEn[i];
+      } }), t, ru && candidatesEn[i] ? el("span", { class: "muted", text: ` / ${candidatesEn[i]}` }) : null))) : null,
     el("label", { class: "field" }, el("span", { text: "Название" }), title, counter),
-    el("label", { class: "field" }, el("span", { text: "Running title" }), running),
+    ru ? el("label", { class: "field" }, el("span", { text: "Название на английском (Title)" }), titleEn) : null,
+    el("label", { class: "field" }, el("span", { text: ru ? "Краткое название (running title)" : "Running title" }), running),
     el("label", { class: "field" }, el("span", { text: `Ключевые слова (через «;»)${m.template?.keywords?.max ? `, до ${m.template.keywords.max}` : ""}` }), kw),
+    ru ? el("label", { class: "field" }, el("span", { text: "Keywords — ключевые слова на английском (через «;»)" }), kwEn) : null,
     el("label", { class: "field" }, el("span", { text: "Highlights (по строке)" }), hl),
     el("div", {}, save));
 }

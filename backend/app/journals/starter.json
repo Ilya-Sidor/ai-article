@@ -47,5 +47,12 @@
     "publisher": "BMC (Springer Nature)",
     "guidelines_url": "https://link.springer.com/journal/13000/submission-guidelines",
     "csl_suggestion": "diagnostic-pathology"
+  },
+  {
+    "id": "arkhiv-patologii",
+    "name": "Архив патологии",
+    "publisher": "Медиа Сфера",
+    "guidelines_url": "https://www.mediasphera.ru/journal/arkhiv-patologii",
+    "csl_suggestion": "american-medical-association"
   }
 ]

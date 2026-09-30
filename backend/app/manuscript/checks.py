@@ -8,14 +8,18 @@ import re
 from pathlib import Path
 
 from .. import config
+from . import lang as L
 from .render import LATEX_LEFTOVER, word_count
 
 DEFAULT_CLICHES = Path(__file__).parent / "cliches.json"
 STRONG = re.compile(r"\b(demonstrat\w*|prove[sdn]?|proves|establish\w*|confirm\w*|definitive\w*|clearly show\w*|"
                     r"significant(ly)?)\b", re.I)
+STRONG_RU = re.compile(r"(?<![а-яё])(доказ\w*|установлен\w*|достоверн\w*|подтвержда\w*|подтвердил\w*|"
+                       r"убедительно|статистически значим\w*|значим(ая|ое|ые|ой|ых|о)\b)", re.I)
 NUMBER = re.compile(r"(?<![\w.\-/:])(\d+(?:[.,]\d+)?)(?![\w\-/:]|\.\d)")
-ABBR = re.compile(r"\b([A-Z][A-Z0-9&]{1,6})s?\b")
-ABBR_OK = {"CI", "OR", "SD", "DNA", "RNA", "WHO", "USA", "UK", "II", "III", "IV", "VI", "HE", "AND", "OR", "NOS"}
+ABBR = re.compile(r"\b([A-ZА-ЯЁ][A-ZА-ЯЁ0-9&]{1,6})s?\b")
+ABBR_OK = {"CI", "OR", "SD", "DNA", "RNA", "WHO", "USA", "UK", "II", "III", "IV", "VI", "HE", "AND", "OR", "NOS",
+           "ДИ", "ОШ", "ОР", "МКИ", "ДНК", "РНК", "ВОЗ", "РФ", "СИ", "США"}
 UK_US = [("tumour", "tumor"), ("haematoxylin", "hematoxylin"), ("oesophag", "esophag"), ("oedema", "edema"),
          ("anaemia", "anemia"), ("paediatric", "pediatric"), ("haemorrhag", "hemorrhag"), ("colour", "color"),
          ("behaviour", "behavior"), ("centre", "center"), ("analyse", "analyze"), ("characteris", "characteriz"),
@@ -40,7 +44,7 @@ def add_cliche(pattern, suggestion):
 
 
 def _sentences(text):
-    return [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z(\[])", text) if s.strip()]
+    return [s for s in re.split(r"(?<=[.!?])\s+(?=[A-ZА-ЯЁ(\[«])", text) if s.strip()]
 
 
 def check(sections, renderer, facts, findings, template, tier_code, inputs_text, names, budgets):
@@ -54,8 +58,9 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
     fact_values = {f["value"].replace(",", ".") for f in facts.values() if f["kind"] == "number"}
     allowed_numbers = set(re.findall(r"\d+(?:[.,]\d+)?", inputs_text)) | set(re.findall(r"\d+", " ".join(names)))
     evidence = {f["id"]: f["evidence"] for f in findings}
-    name_tokens = {t.upper() for n in names for t in re.findall(r"[A-Za-z][A-Za-z0-9-]*", n)}
+    name_tokens = {t.upper() for n in names for t in re.findall(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9-]*", n)}
     variant = template.get("language_variant") if template else None
+    lang = L.of(template)
     main_text, abstract_text = [], ""
     counts = {"sections": {}}
     all_cl = cliches()
@@ -64,13 +69,14 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
         src = sec["source"]
         if not src.strip():
             continue
-        segs = renderer.segments(src)
-        text = renderer.text(src)
+        segs = renderer.segments(src, sec["kind"])
+        text = renderer.text(src, sec["kind"])
+        russian = lang == "ru" and sec["kind"] != "abstract_en"
         wc = word_count(text)
         counts["sections"][sec["key"]] = wc
         if sec["kind"] == "abstract":
             abstract_text = text
-        elif sec["kind"] not in ("statements",):
+        elif sec["kind"] not in ("statements", "abstract_en"):
             main_text.append(text)
         tex = LATEX_LEFTOVER.search(text)
         if tex:
@@ -96,9 +102,10 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
                         num = m.group(1)
                         tail = seg["v"][m.end():m.end() + 6]
                         head = seg["v"][max(0, m.start() - 8):m.start()]
-                        if num in whitelist or num in allowed_numbers or tail.startswith("% CI") \
-                                or re.search(r"(Table|Figure|Fig\.)\s*$", head):
-                            if re.search(r"(Table|Figure|Fig\.)\s*$", head):
+                        manual = r"(Table|Figure|Fig\.|[Тт]абл\.?|[Тт]аблиц\w*|[Рр]ис\.?|[Рр]исун\w*)\s*$"
+                        if num in whitelist or num in allowed_numbers or tail.startswith(("% CI", "% ДИ")) \
+                                or re.search(manual, head):
+                            if re.search(manual, head):
                                 add(sec, "warning", "manual_ref", f"номер «{head.strip()} {num}» набран вручную",
                                     head + num, "используйте {{TAB:…}} / {{FIG:…}}")
                             continue
@@ -115,12 +122,13 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
         for s in _sentences(src):
             ids = set(re.findall(r"\{\{\s*(A\d+)\.", s))
             weak = [i for i in ids if evidence.get(i) in ("exploratory", "descriptive")]
-            m = STRONG.search(s)
+            m = (STRONG_RU if russian else STRONG).search(s)
             if weak and m:
                 sev = "blocking" if tier_code == "minimal" and sec["kind"] in ("abstract", "conclusion") else "warning"
                 add(sec, sev, "evidence_wording",
                     f"«{m.group(0)}» — слишком сильно для находки уровня exploratory/описательная ({', '.join(weak)})",
-                    s, "suggests / was observed in this series / warrants validation")
+                    s, "«наблюдалось в данной серии» / «может указывать» / «требует подтверждения»" if russian
+                    else "suggests / was observed in this series / warrants validation")
         # clichés
         for c in all_cl:
             for m in re.finditer(c["pattern"], text, re.I):
@@ -137,19 +145,20 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
                     add(sec, "warning", "spelling", f"вариант «{wrong}…» не соответствует {variant} English", wrong,
                         uk if variant == "UK" else us)
         plain = "".join(seg["v"] for par in segs for seg in par["segments"] if seg["t"] not in ("todo", "unknown"))
-        cyr = re.findall(r"[А-Яа-яЁё][А-Яа-яЁё\s-]*", plain)
+        cyr = [] if russian else re.findall(r"[А-Яа-яЁё][А-Яа-яЁё\s-]*", plain)
         if cyr:
             add(sec, "blocking", "cyrillic", "кириллица в англоязычном тексте: " + ", ".join(sorted(set(cyr))[:5]),
                 cyr[0], "переведите термины на шаге «Терминология» и исправьте текст")
-        if sec["kind"] == "discussion" and not re.search(r"limitation", text, re.I):
-            add(sec, "blocking", "limitations", "в Discussion нет абзаца об ограничениях (FR-5.5)")
+        if sec["kind"] == "discussion" and not re.search(r"limitation|ограничени", text, re.I):
+            add(sec, "blocking", "limitations", "в обсуждении нет абзаца об ограничениях исследования (FR-5.5)")
 
     # abbreviations: defined at first use, separately for the abstract and the main text
     for label, scope in (("abstract", [s for s in sections if s["kind"] == "abstract"]),
-                         ("main", [s for s in sections if s["kind"] not in ("abstract", "statements")])):
+                         ("abstract", [s for s in sections if s["kind"] == "abstract_en"]),
+                         ("main", [s for s in sections if s["kind"] not in ("abstract", "abstract_en", "statements")])):
         seen = set()
         for sec in scope:
-            text = renderer.text(sec["source"])
+            text = renderer.text(sec["source"], sec["kind"])
             for m in ABBR.finditer(text):
                 a = m.group(1)
                 if a in seen or a in ABBR_OK or a in name_tokens or re.fullmatch(r"[IVX]+", a):
@@ -161,7 +170,7 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
                         + (" в abstract" if label == "abstract" else ""), a)
 
     # terminology consistency across the manuscript
-    full = " ".join(renderer.text(s["source"]) for s in sections)
+    full = " ".join(renderer.text(s["source"], s["kind"]) for s in sections)
     variants = {}
     for tok in re.findall(r"\b[A-Za-z]{1,5}-?\d{1,4}[A-Za-z]?\b", full):
         variants.setdefault(tok.replace("-", "").lower(), set()).add(tok)

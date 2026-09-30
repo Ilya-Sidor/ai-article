@@ -37,6 +37,32 @@ WRITING_RULES = """Writing rules (apply to every text you produce):
   starting with "### ". No LaTeX, no $...$ math and no Markdown emphasis: write symbols as Unicode characters
   (≥, ≤, ±, ×, χ², α, κ)."""
 
+WRITING_RULES_RU = """Правила (для всего текста, который вы пишете):
+- Статья пишется на русском языке: научный стиль отечественного патологоанатомического журнала; тон: {tone}.
+  Термины — по классификации опухолей ВОЗ и нормам русскоязычной патологической анатомии; символы генов
+  латиницей по HGNC (KIT, PDGFRA), маркеры как принято (CD117, DOG1, Ki-67).
+- ЧИСЛА: никогда не пишите число из данных или анализа. Вместо него — placeholder факта, например
+  «в {{{{A1.row2.col2}}}} из {{{{A1.row2.total}}}} наблюдений ({{{{A1.row2.col2.pct}}}}%)»,
+  «({{{{A1.effect_expr}}}}; {{{{A1.p_expr}}}}, {{{{A1.q_expr}}}})», «медиана возраста {{{{V2.median}}}} года». Только id из
+  списка фактов; при подстановке числа оформляются по-русски (десятичная запятая, «ОШ», «95% ДИ»). Числа в
+  названиях (CD117, экзон 11, pT2) и числа из данных автора о методах можно писать напрямую.
+- Таблицы и рисунки упоминайте только как {{{{TAB:<id>}}}} и {{{{FIG:<id>}}}} (номера и «табл.»/«рис.» подставятся).
+- Уровни доказательности: находки «exploratory» и «descriptive» описывайте как наблюдения в данной серии
+  («наблюдалось», «в данной серии», «может указывать», «требует подтверждения на независимой выборке»), никогда
+  «доказано», «установлено», «достоверно». Статистически значимыми можно называть только находки уровня
+  «significant» (после поправки FDR).
+- Не утверждайте ничего о предшествующих работах без цитаты из списка или из search_literature. Никогда не
+  цитируйте по памяти.
+- Если для текста не хватает информации (клон антитела, номер одобрения и т. п.), пишите в этом месте
+  [уточнить: <чего не хватает>] и ничего не придумывайте.
+- Без канцелярита и штампов: «является», «данный», «в рамках», «играет важную роль», «на сегодняшний день»,
+  «следует отметить», «необходимо подчеркнуть», цепочки родительных падежей и отглагольных существительных.
+- Каждую аббревиатуру расшифровывайте при первом упоминании: «гастроинтестинальная стромальная опухоль (ГИСО)».
+  Не сокращайте простые слова.
+- Единицы измерения — в системе СИ.
+- Формат: обычный текст для Word; абзацы через пустую строку; подзаголовки — строкой, начинающейся с «### ».
+  Без LaTeX, без $…$ и без Markdown-выделения; символы — Unicode (≥, ≤, ±, ×, χ², α, κ)."""
+
 KIND_INSTRUCTIONS = {
     "introduction": "Introduction: background on the entity and the specific question, supported by citations; the "
                     "knowledge gap and what this series adds (use the confirmed novelty statements); end with the "
@@ -62,8 +88,15 @@ KIND_INSTRUCTIONS = {
     "abstract": "Abstract: summarise the accepted sections provided. Structure and word limit from the journal "
                 "template; for a structured abstract use '### <Heading>' for each heading in the given order. Use "
                 "fact placeholders for all numbers. No citations, no abbreviations without definition.",
+    "abstract_en": "English abstract of a Russian-language article: an accurate English version of the accepted "
+                   "Russian abstract given below, with the same content and structure; for a structured abstract "
+                   "use '### <Heading>' with the English equivalents of the Russian headings (e.g. Objective, "
+                   "Material and methods, Results, Conclusion). Keep every fact placeholder, add nothing new. "
+                   "Consistent British or American spelling.",
     "other": "Write this section according to the plan points.",
 }
+RU_NOTE = ("Write the section in Russian (the instructions above are in English only for brevity); a Russian "
+           "structured abstract uses the journal's Russian headings.")
 
 SECTION_SCHEMA = {
     "type": "object",
@@ -85,11 +118,25 @@ and describe each in new_citations (marker "NEW:1", chunk_id, a short verbatim q
 fragment, and the claim it supports). questions: what you need from the author (in Russian)."""
 
 
-def _system(ctx):
-    return (f"You are drafting one section of a pathology manuscript together with its author.\n\n"
-            + WRITING_RULES.format(variant=ctx.get("language_variant") or "consistent (British or American)",
-                                   tone=ctx.get("tone") or "clinico-pathological, precise")
-            + "\n\n" + CITATION_RULES)
+def _russian(ctx, kind=None):
+    return ctx.get("lang") == "ru" and kind != "abstract_en"
+
+
+def _system(ctx, kind=None):
+    if _russian(ctx, kind):
+        rules = WRITING_RULES_RU.format(tone=ctx.get("tone") or "клинико-морфологический, точный")
+    else:
+        rules = WRITING_RULES.format(variant=ctx.get("language_variant") or "consistent (British or American)",
+                                     tone=ctx.get("tone") or "clinico-pathological, precise")
+    return ("You are drafting one section of a pathology manuscript together with its author.\n\n"
+            + rules + "\n\n" + CITATION_RULES)
+
+
+def _instruction(ctx, kind):
+    instr = KIND_INSTRUCTIONS.get(kind, KIND_INSTRUCTIONS["other"])
+    if _russian(ctx, kind):
+        instr = instr.replace("'This study has limitations'", "«Ограничения исследования»") + " " + RU_NOTE
+    return instr
 
 
 def _facts_block(ctx):
@@ -115,7 +162,7 @@ def _call_plain(project, purpose, system, user, schema, gate=True):
 
 def write_section(project, section, ctx, search_fn=None, extra_sources=None):
     kind = section["kind"]
-    instr = KIND_INSTRUCTIONS.get(kind, KIND_INSTRUCTIONS["other"])
+    instr = _instruction(ctx, kind)
     user = (f"Section to write: {section['heading']} (kind: {kind})\n{instr}\n\n"
             f"Plan for this section: {json.dumps(section.get('plan') or {}, ensure_ascii=False)}\n"
             f"Word budget: {section.get('budget') or 'not set'}\n\n"
@@ -125,23 +172,26 @@ def write_section(project, section, ctx, search_fn=None, extra_sources=None):
         user += "\nAccepted sections of the manuscript (source text with placeholders):\n" + extra_sources
     purpose = f"write_section:{kind}"
     if search_fn and kind in ("introduction", "discussion", "other"):
-        out, queries = _run_with_search(project, purpose, _system(ctx), user, SECTION_SCHEMA, search_fn, gate=True)
+        out, queries = _run_with_search(project, purpose, _system(ctx, kind), user, SECTION_SCHEMA, search_fn,
+                                        gate=True)
         out["queries"] = queries
         return out
-    return _call_plain(project, purpose, _system(ctx), user, SECTION_SCHEMA)
+    return _call_plain(project, purpose, _system(ctx, kind), user, SECTION_SCHEMA)
 
 
 def revise_section(project, section, source, instruction, selection, ctx, search_fn=None):
     user = (f"Revise the section '{section['heading']}' according to the author's instruction.\n"
             f"Instruction (may be in Russian): {instruction}\n"
             + (f"Apply it to this fragment only, keep the rest unchanged: «{selection}»\n" if selection else "")
-            + "Keep all placeholders and citation markers that remain relevant; return the full revised section.\n\n"
+            + "Keep all placeholders and citation markers that remain relevant; return the full revised section"
+            + (" in Russian" if _russian(ctx, section["kind"]) else "") + ".\n\n"
             f"Current source text:\n{source}\n\nStudy context:\n{_context_block(ctx)}\n\n"
             f"Facts:\n{_facts_block(ctx)}\n")
     if search_fn and section["kind"] in ("introduction", "discussion", "other"):
-        out, _ = _run_with_search(project, "revise_section", _system(ctx), user, SECTION_SCHEMA, search_fn, gate=True)
+        out, _ = _run_with_search(project, "revise_section", _system(ctx, section["kind"]), user, SECTION_SCHEMA,
+                                  search_fn, gate=True)
         return out
-    return _call_plain(project, "revise_section", _system(ctx), user, SECTION_SCHEMA)
+    return _call_plain(project, "revise_section", _system(ctx, section["kind"]), user, SECTION_SCHEMA)
 
 
 PLAN_SCHEMA = {
@@ -167,8 +217,9 @@ def make_plan(project, ctx, headings, word_limit):
         "findings (respect evidence levels) and the confirmed novelty. For each section heading given (keep them and "
         "their order) list 3-7 concrete points and a word budget; the budgets of the main sections must sum to at "
         f"most {word_limit or 'a reasonable length for this article type'}. Choose which tables and figures "
-        "(by id) to include. Points and rationale in Russian; key messages in English. Do not write numbers — "
-        "refer to findings by id.")
+        "(by id) to include. Points and rationale in Russian; key messages in "
+        + ("Russian (the article is written in Russian)" if ctx.get("lang") == "ru" else "English")
+        + ". Do not write numbers — refer to findings by id.")
     user = f"Section headings: {headings}\n\nStudy context:\n{_context_block(ctx)}"
     return _call_plain(project, "plan", system, user, PLAN_SCHEMA)
 
@@ -179,6 +230,13 @@ FRONT_SCHEMA = {
                    "keywords": {"type": "array", "items": {"type": "string"}},
                    "highlights": {"type": "array", "items": {"type": "string"}}},
     "required": ["titles", "running_title", "keywords", "highlights"], "additionalProperties": False,
+}
+# a Russian article carries its title and keywords in both languages
+FRONT_SCHEMA_RU = {
+    "type": "object",
+    "properties": {**FRONT_SCHEMA["properties"], "titles_en": {"type": "array", "items": {"type": "string"}},
+                   "keywords_en": {"type": "array", "items": {"type": "string"}}},
+    "required": FRONT_SCHEMA["required"] + ["titles_en", "keywords_en"], "additionalProperties": False,
 }
 
 
@@ -193,6 +251,11 @@ def front_matter(project, ctx, template, sections_text):
               + WRITING_RULES.split("\n- NUMBERS")[0].format(variant=ctx.get("language_variant") or "consistent",
                                                              tone=ctx.get("tone") or "precise"))
     user = f"Key messages: {ctx.get('key_messages')}\n\nManuscript sections:\n{sections_text}"
+    if ctx.get("lang") == "ru":
+        system += ("\n\nThe article is written in Russian: titles, running title, keywords and highlights in Russian; "
+                   "titles_en — the English version of each title in the same order; keywords_en — the English "
+                   "keywords in the same order (MeSH terms where possible).")
+        return _call_plain(project, "front", system, user, FRONT_SCHEMA_RU)
     return _call_plain(project, "front", system, user, FRONT_SCHEMA)
 
 

@@ -86,7 +86,7 @@ def journal(data_dir):
 def test_starter_base_has_no_hardcoded_values(data_dir):
     journals.seed()
     profiles = journals.list_profiles()
-    assert len(profiles) == 7
+    assert len(profiles) == 8
     for s in profiles:
         p = journals.get(s["id"])
         assert p["fields"] == {} and s["status"] == "empty" and p["guidelines_url"].startswith("https://")

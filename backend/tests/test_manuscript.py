@@ -279,7 +279,7 @@ def test_latex_from_model_json_does_not_break_export():
     class R:
         bibliography = [{"text": "Ref \x0b1"}]
 
-        def segments(self, source):
+        def segments(self, source, kind=None):
             return [{"type": "p", "segments": [{"t": "text", "v": source}]}]
     ctx = {"renderer": R(), "front": {"title": "T\x08", "keywords": ["k\x01"]}, "authors": [],
            "sections": [("Methods", "methods", "q \x08igwedge ge 0.05")], "counts": {}, "tables": [
@@ -309,7 +309,7 @@ def test_subheading_without_blank_line_keeps_paragraph_and_facts():
     paragraph was rendered as a heading with raw placeholders."""
     from app.manuscript.render import Renderer
     r = Renderer.__new__(Renderer)
-    r.facts = {"A1.p_expr": {"value": "p = 0.003", "desc": "p", "kind": "text"}}
+    r.facts, r.lang = {"A1.p_expr": {"value": "p = 0.003", "desc": "p", "kind": "text"}}, "en"
     paras = r.segments("## Results\nKi-67 correlated ({{A1.p_expr}}).\n### Conclusions\nDone.")
     assert [p["type"] for p in paras] == ["heading", "p", "heading", "p"]
     assert paras[0]["segments"][0]["v"] == "Results"

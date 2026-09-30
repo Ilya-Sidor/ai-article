@@ -27,6 +27,7 @@ def _en_level(terms, name, level):
     return ((terms.get(name) or {}).get("levels") or {}).get(level) or level
 
 
+
 def assign_ids(ids, analysis):
     """Stable short ids for accepted findings (A1…) and analysed variables (V1…)."""
     fmap, vmap = ids.setdefault("findings", {}), ids.setdefault("variables", {})
@@ -39,10 +40,17 @@ def assign_ids(ids, analysis):
     return ids
 
 
-def build(store, pid, ids, terms):
-    """{"facts": {id: {value, desc, kind, ref}}, "findings": [...], "variables": [...]}."""
+def build(store, pid, ids, terms, lang="en"):
+    """{"facts": {id: {value, desc, kind, ref}}, "findings": [...], "variables": [...]}.
+
+    Values are in the engine's English notation (the renderer localises them); descriptions name variables
+    the way the manuscript will: English terms, or the data's own Russian names in a Russian manuscript."""
     analysis = engine.latest(store, pid) or {}
     facts = {}
+    if lang == "ru":
+        name, level = (lambda n: n), (lambda n, lv: lv)
+    else:
+        name, level = (lambda n: _en(terms, n)), (lambda n, lv: _en_level(terms, n, lv))
 
     def add(fid, value, desc, kind="number", ref=None):
         if value is None:
@@ -64,7 +72,7 @@ def build(store, pid, ids, terms):
         vid = vmap.get(v["variable"])
         if not vid:
             continue
-        label = _en(terms, v["variable"])
+        label = name(v["variable"])
         ref = {"type": "table1", "variable": v["variable"]}
         variables.append({"id": vid, "name": v["variable"], "label": label, "vtype": v["vtype"]})
         add(f"{vid}.n", v["n"], f"{label}: cases with data", ref=ref)
@@ -74,7 +82,7 @@ def build(store, pid, ids, terms):
                 if v.get(k) is not None:
                     add(f"{vid}.{k}", fmt(v[k]), f"{label}: {k}", ref=ref)
         for i, c in enumerate(v.get("counts") or [], 1):
-            lvl = _en_level(terms, v["variable"], c["level"])
+            lvl = level(v["variable"], c["level"])
             add(f"{vid}.L{i}.count", c["count"], f"{label} = {lvl}: number of cases", ref=ref)
             if c.get("percent") is not None:
                 add(f"{vid}.L{i}.pct", fmt(c["percent"], 0), f"{label} = {lvl}: percent of cases with data", ref=ref)
@@ -93,7 +101,7 @@ def build(store, pid, ids, terms):
         r = f.get("result")
         if not r:
             continue
-        a, b = _en(terms, r["a"]), _en(terms, r["b"])
+        a, b = name(r["a"]), name(r["b"])
         add(f"{aid}.n", r["n"], f"{aid} ({a} × {b}): cases with complete data", ref=ref)
         add(f"{aid}.p_expr", _p_expr("p", r.get("p")), f"{aid}: renders 'p = …' or 'p < 0.001'", "expr", ref)
         add(f"{aid}.q_expr", _p_expr("q", r.get("q")), f"{aid}: renders 'q = …' (FDR-adjusted)", "expr", ref)
@@ -107,8 +115,8 @@ def build(store, pid, ids, terms):
             add(f"{aid}.effect_expr", f"{ename} {fmt(e['value'])}, 95% CI {fmt(e['ci_low'])}–{fmt(e['ci_high'])}",
                 f"{aid}: renders '{ename} x, 95% CI a–b'", "expr", ref)
         if r["kind"] == "cat_cat":
-            la = [_en_level(terms, r["a"], x) for x in r["levels_a"]]
-            lb = [_en_level(terms, r["b"], x) for x in r["levels_b"]]
+            la = [level(r["a"], x) for x in r["levels_a"]]
+            lb = [level(r["b"], x) for x in r["levels_b"]]
             for i, row in enumerate(r["table"]):
                 tot = sum(row)
                 add(f"{aid}.row{i + 1}.total", tot, f"{aid}: cases with {a} = {la[i]}", ref=ref)
@@ -119,7 +127,7 @@ def build(store, pid, ids, terms):
                             f"{aid}: percent with {b} = {lb[j]} among {a} = {la[i]}", ref=ref)
         elif r["kind"] == "group_numeric":
             for i, g in enumerate(r["groups"], 1):
-                lvl = _en_level(terms, r["a"], g["level"])
+                lvl = level(r["a"], g["level"])
                 add(f"{aid}.g{i}.n", g["n"], f"{aid}: cases with {a} = {lvl}", ref=ref)
                 for k in ("median", "q1", "q3", "min", "max"):
                     add(f"{aid}.g{i}.{k}", fmt(g[k]), f"{aid}: {b} {k} in {a} = {lvl}", ref=ref)

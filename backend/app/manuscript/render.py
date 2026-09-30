@@ -11,6 +11,7 @@ Markup of the source text (what the model and the author edit):
 import re
 
 from ..literature.citations import render_clusters
+from . import lang as L
 
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _TEX_SYMBOLS = {"geq": "≥", "ge": "≥", "leq": "≤", "le": "≤", "neq": "≠", "ne": "≠", "pm": "±", "times": "×",
@@ -78,8 +79,9 @@ def collect_clusters(sections):
 
 
 class Renderer:
-    def __init__(self, facts, state, citations, sources, style, sections):
+    def __init__(self, facts, state, citations, sources, style, sections, lang="en"):
         self.facts = facts
+        self.lang = lang
         self.tab_no, self.fig_no = numbering(state)
         self.cit = {c["id"]: c for c in citations}
         clusters = collect_clusters(sections)
@@ -95,8 +97,13 @@ class Renderer:
         self.cluster_markers = {tuple(cl): m for cl, m in zip(clusters, r["markers"])}
         self.bibliography = r["entries"]
 
-    def segments(self, source):
+    def lang_of(self, kind=None):
+        """The English abstract of a Russian manuscript keeps English notation."""
+        return "en" if kind == "abstract_en" else self.lang
+
+    def segments(self, source, kind=None):
         """Paragraph list; each paragraph is a list of typed segments for the UI and the exporter."""
+        lang = self.lang_of(kind)
         paragraphs = []
         source = normalize_placeholders(source, self.facts)
         # a "### " subheading is always its own block, even when the model puts its paragraph on the next line
@@ -113,27 +120,30 @@ class Renderer:
             for m in TOKEN.finditer(block):
                 if m.start() > pos:
                     segs.append({"t": "text", "v": plain_text(block[pos:m.start()])})
-                segs.append(self._token(m))
+                segs.append(self._token(m, lang))
                 pos = m.end()
             if pos < len(block):
                 segs.append({"t": "text", "v": plain_text(block[pos:])})
             paragraphs.append({"type": "p", "segments": segs})
         return paragraphs
 
-    def _token(self, m):
+    def _token(self, m, lang="en"):
         raw = m.group(0)
         if m.group(1):
             key = m.group(1)
             if key.upper().startswith("TAB:"):
                 n = self.tab_no.get(key[4:])
-                return {"t": "ref", "v": f"Table {n}", "raw": raw} if n else {"t": "unknown", "v": raw, "raw": raw}
+                return ({"t": "ref", "v": f"{L.label('table_ref', lang)} {n}", "raw": raw} if n
+                        else {"t": "unknown", "v": raw, "raw": raw})
             if key.upper().startswith("FIG:"):
                 n = self.fig_no.get(key[4:])
-                return {"t": "ref", "v": f"Figure {n}", "raw": raw} if n else {"t": "unknown", "v": raw, "raw": raw}
+                return ({"t": "ref", "v": f"{L.label('figure_ref', lang)} {n}", "raw": raw} if n
+                        else {"t": "unknown", "v": raw, "raw": raw})
             f = self.facts.get(key)
             if f is None:
                 return {"t": "unknown", "v": raw, "raw": raw}
-            return {"t": "fact", "id": key, "v": f["value"], "desc": f["desc"], "ref": f.get("ref"), "raw": raw}
+            return {"t": "fact", "id": key, "v": L.fact(f["value"], lang), "desc": f["desc"], "ref": f.get("ref"),
+                    "raw": raw}
         if m.group(2):
             ids = [c.strip() for c in m.group(2).split(",")]
             bad = [c for c in ids if c not in self.cit or self.cit[c]["decision"] == "rejected"]
@@ -141,10 +151,10 @@ class Renderer:
                     "bad": bad, "raw": raw}
         return {"t": "todo", "v": m.group(3).strip(), "raw": raw}
 
-    def text(self, source):
+    def text(self, source, kind=None):
         """Plain rendered text (for word counts, checks and export)."""
         out = []
-        for p in self.segments(source):
+        for p in self.segments(source, kind):
             s = "".join(seg["v"] if seg["t"] != "todo" else f"[{seg['v']}]" for seg in p["segments"])
             out.append(s if p["type"] == "p" else s.upper())
         return "\n\n".join(out)

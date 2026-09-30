@@ -14,7 +14,7 @@ from .journals import checks as jchecks, store as journals
 from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
-from .manuscript import agent, assets, checks as mchecks, export, facts as mfacts, statements
+from .manuscript import agent, assets, checks as mchecks, export, facts as mfacts, lang as mlang, statements
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -42,7 +42,8 @@ def _headings(project, template, state):
         return [s["heading"] for s in state["plan"]["sections"]]
     if template and template["sections"]:
         return [h for h in template["sections"] if not h.lower().startswith(("abstract", "reference"))]
-    return ms.DEFAULT_SECTIONS.get(project["article_type"], ms.DEFAULT_SECTIONS["_default"])
+    defaults = ms.DEFAULT_SECTIONS_RU if mlang.of(template) == "ru" else ms.DEFAULT_SECTIONS
+    return defaults.get(project["article_type"], defaults["_default"])
 
 
 def _log_summary(analysis):
@@ -66,8 +67,9 @@ def context(pid, state=None):
     analysis = engine.latest(store, pid) or {}
     mfacts.assign_ids(state["ids"], analysis)
     assets.sync(state, analysis)
-    built = mfacts.build(store, pid, state["ids"], state["terms"])
     profile, template = _profile_template(project)
+    lang = mlang.of(template)
+    built = mfacts.build(store, pid, state["ids"], state["terms"], lang)
     comps = _comparisons(pid)
     labels = {s["id"]: s["label"] for s in lit.sources(store, pid)}
     cits = [{"id": c["id"], "source": labels.get(c["source_id"]), "claim": c["claim"], "quote": c["quote"],
@@ -81,14 +83,14 @@ def context(pid, state=None):
                          "literature_status": comp.get("literature_status"),
                          "novelty": comp.get("novelty") if comp.get("novelty_confirmed") else None})
     tables = [{"placeholder": f"{{{{TAB:{t['id']}}}}}", "include": t["include"],
-               "caption": t.get("caption") or assets.default_caption(t, analysis, state["terms"], "table")}
+               "caption": t.get("caption") or assets.default_caption(t, analysis, state["terms"], "table", lang)}
               for t in state["tables"]]
     figures_ = [{"placeholder": f"{{{{FIG:{f['id']}}}}}", "include": f["include"],
-                 "caption": f.get("caption") or assets.default_caption(f, analysis, state["terms"], "figure")}
+                 "caption": f.get("caption") or assets.default_caption(f, analysis, state["terms"], "figure", lang)}
                 for f in state["figures"]]
     ctx = {
         "project": project, "analysis": analysis, "facts": built["facts"], "findings": findings,
-        "variables": built["variables"], "template": template, "profile": profile,
+        "variables": built["variables"], "template": template, "profile": profile, "lang": lang,
         "journal": project.get("journal"), "article_type": project["article_type"], "focus": project.get("focus"),
         "language_variant": (template or {}).get("language_variant"), "tone": (template or {}).get("tone"),
         "tier": tier_for((analysis.get("summary") or {}).get("n", 0)).label if analysis else None,
@@ -121,15 +123,21 @@ def _fingerprints(ctx, state):
         "conclusion": ms.fingerprint({**base, "findings": findings}),
         "other": ms.fingerprint({**base, "findings": findings, "cits": cits}),
         "abstract": ms.fingerprint({**base, "accepted": accepted}),
+        "abstract_en": ms.fingerprint({"abstract": (state["sections"].get("abstract") or {}).get("accepted_version")}),
         "statements": ms.fingerprint({"inputs": state.get("inputs"),
                                       "template": (ctx["template"] or {}).get("statements")}),
     }
 
 
+def _figure_language(ctx, state):
+    """Labels on figures: the author's choice, else the manuscript language."""
+    return state.get("figure_language") or ctx.get("lang", "en")
+
+
 def _renderer(pid, ctx, state):
     secs = [{"source": ms.current_source(s)} for s in ms.ordered(state)]
     return Renderer(ctx["facts"], state, lit.citations(store, pid), lit.sources(store, pid),
-                    lit.settings(store, pid)["style"], secs)
+                    lit.settings(store, pid)["style"], secs, ctx.get("lang", "en"))
 
 
 def _budgets(state):
@@ -200,7 +208,7 @@ def _view(pid, ctx, state):
         sections.append({
             "key": s["key"], "heading": s["heading"], "kind": s["kind"], "status": s["status"],
             "stale": bool(cur and cur.get("fingerprint") and cur["fingerprint"] != fp),
-            "source": cur["source"] if cur else "", "segments": renderer.segments(cur["source"]) if cur else [],
+            "source": cur["source"] if cur else "", "segments": renderer.segments(cur["source"], s["kind"]) if cur else [],
             "versions": [{k: v.get(k) for k in ("n", "ts", "actor", "note", "questions")} for v in s["versions"]],
             "accepted_version": s.get("accepted_version"), "comments": s["comments"],
             "words": counts["sections"].get(s["key"]), "budget": budgets.get(s["key"]),
@@ -211,11 +219,15 @@ def _view(pid, ctx, state):
         })
     tables = [dict(t, caption_effective=c["caption"]) for t, c in zip(state["tables"], ctx["all_tables"])]
     figures_ = [dict(f, caption_effective=c["caption"]) for f, c in zip(state["figures"], ctx["all_figures"])]
+    if ctx["lang"] == "ru":  # English captions of a bilingual journal
+        for items, kind in ((tables, "table"), (figures_, "figure")):
+            for it in items:
+                it["caption_en_effective"] = assets.default_caption(it, ctx["analysis"], state["terms"], kind, "en")
     return {
         "plan": state.get("plan"), "inputs": state.get("inputs"), "terms": state["terms"],
         "terms_needed": mfacts.terms_needed(store, pid), "front": state.get("front") or {},
         "sections": sections, "tables": tables, "figures": figures_,
-        "figure_language": state.get("figure_language", "en"),
+        "figure_language": _figure_language(ctx, state), "lang": ctx["lang"],
         "facts": [{"id": k, "desc": v["desc"], "value": v["value"]} for k, v in ctx["facts"].items()],
         "findings": ctx["findings"], "citations": ctx["citations"], "bibliography": renderer.bibliography,
         "issues": [i for i in issues if i["section"] is None], "counts": counts,
@@ -341,7 +353,8 @@ def approve_plan(pid: str):
         raise HTTPException(400, "план пуст")
     state["plan"]["status"] = "approved"
     state["plan"]["approved_at"] = now_iso()
-    ms.ensure_sections(state, [s["heading"] for s in state["plan"]["sections"]])
+    _, template = _profile_template(store.get(pid))
+    ms.ensure_sections(state, [s["heading"] for s in state["plan"]["sections"]], mlang.of(template))
     ms.save(store, pid, state)
     store.audit(pid, "author", "manuscript.plan_approved", {})
     return get_manuscript(pid)
@@ -363,6 +376,8 @@ def put_assets(pid: str, body: AssetsIn):
                 upd = by_id[it["id"]]
                 it["include"] = bool(upd.get("include", it["include"]))
                 it["caption"] = (upd.get("caption") or "").strip() or None
+                if "caption_en" in upd:  # English caption of a bilingual (Russian) journal
+                    it["caption_en"] = (upd.get("caption_en") or "").strip() or None
     if body.figure_language is not None:
         if body.figure_language not in figs.LANGUAGES:
             raise HTTPException(400, "язык подписей: ru или en")
@@ -387,10 +402,12 @@ def _require_order(state, sec):
         raise HTTPException(400, "сначала согласуйте план статьи (FR-5.1)")
     if sec["kind"] == "abstract":
         need = [s for s in ms.ordered(state) if s["kind"] in ("results", "discussion", "case_presentation")]
+    elif sec["kind"] == "abstract_en":  # translated from the accepted Russian abstract
+        need = [s for s in ms.ordered(state) if s["kind"] == "abstract"]
     elif sec["kind"] == "statements":
         need = []
     else:
-        need = [s for s in ms.ordered(state) if s["kind"] not in ("abstract", "statements")
+        need = [s for s in ms.ordered(state) if s["kind"] not in ("abstract", "abstract_en", "statements")
                 and s["order"] < sec["order"]]
     missing = [s["heading"] for s in need if s["status"] != "accepted"]
     if missing:
@@ -438,7 +455,7 @@ def generate_section(pid: str, key: str):
     fps = _fingerprints(ctx, state)
     fp = fps.get(sec["kind"], fps["other"])
     if sec["kind"] == "statements":
-        source = statements.build(pid, state.get("inputs") or {}, ctx["template"])
+        source = statements.build(pid, state.get("inputs") or {}, ctx["template"], ctx["lang"])
         ms.add_version(state, key, source, "system", "сгенерировано из данных автора", fp)
         ms.save(store, pid, state)
         return get_manuscript(pid)
@@ -446,6 +463,10 @@ def generate_section(pid: str, key: str):
     target = dict(sec, plan=plan, budget=plan.get("words") or (
         (ctx["template"] or {}).get("abstract", {}).get("words") if sec["kind"] == "abstract" else None))
     extra = _accepted_sources(state, key) if sec["kind"] in ("abstract", "discussion", "conclusion") else None
+    if sec["kind"] == "abstract_en":
+        ab = state["sections"]["abstract"]
+        extra = "## Accepted Russian abstract\n" + ms.current_source(ab)
+        target["budget"] = (ctx["template"] or {}).get("abstract", {}).get("words")
     if sec["kind"] == "abstract" and ctx["template"]:
         target["plan"] = {"structured": ctx["template"]["abstract"]["structured"],
                           "headings": ctx["template"]["abstract"]["headings"],
@@ -590,12 +611,15 @@ def generate_front(pid: str):
     if not any(s["status"] == "accepted" for s in state["sections"].values()):
         raise HTTPException(400, "сначала примите хотя бы один раздел")
     renderer = _renderer(pid, ctx, state)
-    text = "\n\n".join(f"## {s['heading']}\n{renderer.text(ms.current_source(s))}" for s in ms.ordered(state)
-                       if s["status"] == "accepted" and s["kind"] != "statements")
+    text = "\n\n".join(f"## {s['heading']}\n{renderer.text(ms.current_source(s), s['kind'])}" for s in ms.ordered(state)
+                       if s["status"] == "accepted" and s["kind"] not in ("statements", "abstract_en"))
     tpl = dict(ctx["template"] or {}, running_title_chars=journals.value(ctx["profile"], "running_title.max_chars")
                if ctx["profile"] else None)
     out = agent.front_matter(ctx["project"], ctx, tpl, text)
     front = state.get("front") or {}
+    if out.get("titles_en"):
+        front["title_candidates_en"] = out["titles_en"]
+        front["keywords_en"] = front.get("keywords_en") or out.get("keywords_en") or []
     front.update({"title_candidates": out["titles"], "running_title": front.get("running_title") or out["running_title"],
                   "keywords": front.get("keywords") or out["keywords"],
                   "highlights": front.get("highlights") or out["highlights"],
@@ -608,8 +632,10 @@ def generate_front(pid: str):
 
 class FrontIn(BaseModel):
     title: Optional[str] = None
+    title_en: Optional[str] = None
     running_title: Optional[str] = None
     keywords: Optional[List[str]] = None
+    keywords_en: Optional[List[str]] = None
     highlights: Optional[List[str]] = None
 
 
@@ -652,7 +678,7 @@ def figure_preview(pid: str, fid: str):
     run_dir = engine.run_dir_latest(store, pid)
     spec = read_json(run_dir / "spec.json")
     # rendered as in the export (language and terminology can change at any time, so no cache)
-    lang = state.get("figure_language", "en")
+    lang = _figure_language(ctx, state)
     if lang == "en":
         _complete_terms(pid, ctx, state, strict=False)
     out = run_dir / "figures" / f"manuscript_{fid}.png"
@@ -693,17 +719,20 @@ def export_status(pid):
                          "message": "не выбран целевой журнал", "fragment": "", "suggestion": ""})
     analysis = ctx["analysis"]
     if analysis:
+        ru = ctx["lang"] == "ru"  # a Russian manuscript: only the English caption must be free of Cyrillic
         for t in state["tables"]:
             if t["include"]:
-                data = assets.table_data(t, analysis, state["terms"])
-                blob = " ".join([data["caption"], *data["columns"], *(c for row in data["rows"] for c in row)])
+                data = assets.table_data(t, analysis, state["terms"], ctx["lang"])
+                blob = data["caption_en"] if ru else " ".join(
+                    [data["caption"], *data["columns"], *(c for row in data["rows"] for c in row)])
                 if re.search(r"[А-Яа-яЁё]", blob):
                     blocking.append({"section": None, "heading": "Таблицы", "severity": "blocking", "code": "cyrillic_table",
                                      "message": f"в таблице «{data['caption'][:60]}» есть кириллица",
                                      "fragment": ", ".join(sorted(set(re.findall(r"[А-Яа-яЁё][А-Яа-яЁё ,%-]*", blob)))[:4]),
                                      "suggestion": "заполните английские термины на шаге «Терминология»"})
         for f in state["figures"]:
-            if f["include"] and re.search(r"[А-Яа-яЁё]", assets.figure_data(f, analysis, state["terms"])["caption"]):
+            fd = assets.figure_data(f, analysis, state["terms"], ctx["lang"])
+            if f["include"] and re.search(r"[А-Яа-яЁё]", fd["caption_en"] if ru else fd["caption"]):
                 blocking.append({"section": None, "heading": "Рисунки", "severity": "blocking", "code": "cyrillic_figure",
                                  "message": f"в подписи рисунка {f['id']} есть кириллица", "fragment": "", "suggestion": ""})
     from .ethics_api import review
@@ -738,8 +767,9 @@ def do_export(pid: str, mode: str = "draft"):
     analysis = ctx["analysis"]
     if not analysis:
         raise HTTPException(400, "нет результатов анализа")
-    tables = [assets.table_data(t, analysis, state["terms"]) for t in state["tables"] if t["include"]]
-    figures_ = [assets.figure_data(f, analysis, state["terms"]) for f in state["figures"] if f["include"]]
+    lang = ctx["lang"]
+    tables = [assets.table_data(t, analysis, state["terms"], lang) for t in state["tables"] if t["include"]]
+    figures_ = [assets.figure_data(f, analysis, state["terms"], lang) for f in state["figures"] if f["include"]]
     tpl = ctx["template"] or {}
     formats = [x.lower() for x in (tpl.get("figures", {}).get("formats") or [])]
     fmt = "tif" if any("tif" in x for x in formats) else "png"
@@ -747,8 +777,8 @@ def do_export(pid: str, mode: str = "draft"):
     sections = [(s["heading"], s["kind"], ms.current_source(s)) for s in ms.ordered(state)]
     ectx = {"renderer": renderer, "front": state.get("front") or {}, "sections": sections, "tables": tables,
             "figures": figures_, "counts": st["counts"], "authors": (state.get("inputs") or {}).get("authors"),
-            "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"],
-            "figure_language": state.get("figure_language", "en")}
+            "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"], "lang": lang,
+            "figure_language": _figure_language(ctx, state)}
     run_dir = engine.run_dir_latest(store, pid)
     extra = {
         "supplementary/cases_anonymized.csv": supplementary_csv(pid),

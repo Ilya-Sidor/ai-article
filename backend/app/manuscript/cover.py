@@ -16,15 +16,20 @@ from .agent import FALLBACK
 TONES = {"formal": "formal and concise", "personal": "warm but professional, first person plural, slightly more personal"}
 
 REQUIRED = [
-    ("originality", r"\b(original|not been published|has not been published|unpublished)\b",
+    ("originality", r"\b(original|not been published|has not been published|unpublished)\b|оригинальн|"
+                    r"не (была |был )?опубликован|ранее не публиковал",
      "заявление об оригинальности (работа не публиковалась)"),
     ("exclusive", r"\b(not under consideration|not being considered|not been submitted|not submitted elsewhere|"
-                  r"exclusively)\b", "заявление, что рукопись не подана в другой журнал"),
-    ("coi", r"\b(conflicts? of interest|competing interests?)\b", "заявление о конфликте интересов"),
-    ("approval", r"\ball (the )?authors (have )?(read and )?approved\b", "все авторы одобрили рукопись"),
+                  r"exclusively)\b|не (направлял|подавал|находится на рассмотрении|рассматривается)",
+     "заявление, что рукопись не подана в другой журнал"),
+    ("coi", r"\b(conflicts? of interest|competing interests?)\b|конфликт\w* интересов",
+     "заявление о конфликте интересов"),
+    ("approval", r"\ball (the )?authors (have )?(read and )?approved\b|все (соавторы|авторы)[^.]{0,40}(одобрил|"
+                 r"ознакомлен|согласн)", "все авторы одобрили рукопись"),
 ]
 HYPE = re.compile(r"\b(groundbreaking|ground-breaking|first[- ]ever|unprecedented|paradigm[- ]shift\w*|"
-                  r"revolutionar\w+|landmark|definitive(ly)?|prove[sn]?)\b", re.I)
+                  r"revolutionar\w+|landmark|definitive(ly)?|prove[sn]?)\b|впервые в мире|революционн\w*|"
+                  r"прорывн\w*|беспрецедентн\w*|доказал\w*|доказыва\w*", re.I)
 
 SCHEMA = {
     "type": "object",
@@ -60,6 +65,11 @@ Rules:
 - 250–400 words. English ({variant}). Tone: {tone}.
 - questions: what you need from the authors (in Russian)."""
 
+SYSTEM_RU = SYSTEM.replace("250–400 words. English ({variant}).", "250–400 words. Write the letter in Russian "
+                           "(a Russian-language journal): «Направляем рукопись…», formal academic Russian; the same "
+                           "declarations in Russian (оригинальность, не направлялась в другие журналы, все авторы "
+                           "ознакомлены и согласны, конфликт интересов).")
+
 
 def empty():
     return {"settings": {"tone": "formal"}, "versions": [], "status": "empty", "comments": [], "confirmed": {}}
@@ -88,10 +98,17 @@ def diff(cover, a, b):
     return list(difflib.unified_diff(split(va["body"]), split(vb["body"]), f"v{a}", f"v{b}", n=1, lineterm=""))
 
 
+def _system(ctx, s):
+    base = SYSTEM_RU if ctx.get("lang") == "ru" else SYSTEM
+    return base.format(variant=ctx.get("language_variant") or "consistent spelling",
+                       tone=TONES.get(s.get("tone"), TONES["formal"]))
+
+
 def _context(ctx, cover, front, abstract_text, statements_source):
     t = ctx.get("template") or {}
     s = cover["settings"]
-    coi = re.search(r"### Conflict of interest\s+(.+?)(?:\n### |\Z)", statements_source or "", re.S)
+    coi = re.search(r"### (?:Conflict of interest|Конфликт интересов)\s+(.+?)(?:\n### |\Z)", statements_source or "",
+                    re.S)
     return {
         "journal": ctx.get("journal"), "journal_scope": (ctx.get("profile") or {}).get("fields", {}).get("scope", {})
         .get("value") if ctx.get("profile") else None,
@@ -113,8 +130,7 @@ def _facts(ctx):
 def generate(project, ctx, cover, front, abstract_text, statements_source):
     import json
     s = cover["settings"]
-    system = SYSTEM.format(variant=ctx.get("language_variant") or "consistent spelling",
-                           tone=TONES.get(s.get("tone"), TONES["formal"]))
+    system = _system(ctx, s)
     user = (json.dumps(_context(ctx, cover, front, abstract_text, statements_source), ensure_ascii=False, indent=1)
             + "\n\nFacts (use ids as placeholders):\n" + _facts(ctx))
     return llm._call(project, "cover_letter", MODEL_REASONING, system, user, SCHEMA, max_tokens=16000, gate=True,
@@ -124,8 +140,7 @@ def generate(project, ctx, cover, front, abstract_text, statements_source):
 def revise(project, ctx, cover, body, instruction, selection, front, abstract_text, statements_source):
     import json
     s = cover["settings"]
-    system = SYSTEM.format(variant=ctx.get("language_variant") or "consistent spelling",
-                           tone=TONES.get(s.get("tone"), TONES["formal"]))
+    system = _system(ctx, s)
     user = (f"Revise the cover letter body according to the authors' instruction (may be in Russian): {instruction}\n"
             + (f"Apply it only to this fragment, keep the rest: «{selection}»\n" if selection else "")
             + f"Current body:\n{body}\n\nContext:\n"
@@ -143,10 +158,12 @@ def _people(text):
     return [line.strip() for line in (text or "").splitlines() if line.strip()]
 
 
-def assemble(cover, rendered_body, journal):
+def assemble(cover, rendered_body, journal, lang="en"):
     """Full letter as a list of (kind, text) blocks."""
     s = cover["settings"]
     editor = (s.get("editor") or "").strip()
+    if lang == "ru":
+        return _assemble_ru(cover, rendered_body, journal, editor)
     blocks = [("date", now_iso()[:10]), ("to", f"{editor + ', ' if editor else ''}Editor-in-Chief\n{journal or ''}".strip()),
               ("p", (s.get("salutation") or "").strip()
                or f"Dear {('Dr ' + editor.split()[-1]) if editor else 'Editor'},")]
@@ -161,6 +178,27 @@ def assemble(cover, rendered_body, journal):
                             "manuscript:"))
         blocks += [("li", x) for x in excl]
     blocks.append(("p", "Yours sincerely,"))
+    sig = [s.get("corresponding_name"), s.get("corresponding_affiliation"), s.get("corresponding_email")]
+    blocks.append(("sig", "\n".join(x for x in sig if x) or "[уточнить: подпись и контакты автора для переписки]"))
+    return blocks
+
+
+def _assemble_ru(cover, rendered_body, journal, editor):
+    s = cover["settings"]
+    blocks = [("date", now_iso()[:10]),
+              ("to", f"Главному редактору журнала «{journal or ''}»" + (f"\n{editor}" if editor else "")),
+              ("p", (s.get("salutation") or "").strip() or
+               (f"Уважаемый(ая) {editor}!" if editor else "Уважаемый главный редактор!"))]
+    blocks += [("p", p.strip()) for p in re.split(r"\n\s*\n", rendered_body.strip()) if p.strip()]
+    sugg, excl = _people(s.get("suggested_reviewers")), _people(s.get("excluded_reviewers"))
+    if sugg:
+        blocks.append(("p", "В качестве возможных рецензентов предлагаем специалистов в данной области, не имеющих "
+                            "конфликта интересов с авторами:"))
+        blocks += [("li", x) for x in sugg]
+    if excl:
+        blocks.append(("p", "Просим не привлекать к рецензированию рукописи:"))
+        blocks += [("li", x) for x in excl]
+    blocks.append(("p", "С уважением,"))
     sig = [s.get("corresponding_name"), s.get("corresponding_affiliation"), s.get("corresponding_email")]
     blocks.append(("sig", "\n".join(x for x in sig if x) or "[уточнить: подпись и контакты автора для переписки]"))
     return blocks
@@ -191,14 +229,17 @@ def check(cover, rendered_body, raw_body, front, template, ctx):
     for m in HYPE.finditer(text):
         add("warning", "hype", f"слишком сильная формулировка: «{m.group(0)}»", m.group(0),
             "в cover letter формулировки не сильнее, чем в статье")
-    if re.search(r"\bsignificant(ly)?\b", text, re.I) and any(f["evidence"] != "significant" for f in ctx["findings"]):
-        add("warning", "evidence_wording", "«significant» при наличии exploratory-находок — проверьте формулировку")
+    if re.search(r"\bsignificant(ly)?\b|статистически значим|достоверн", text, re.I) and any(
+            f["evidence"] != "significant" for f in ctx["findings"]):
+        add("warning", "evidence_wording", "«significant»/«значимо» при наличии exploratory-находок — проверьте "
+                                           "формулировку")
     for m in re.finditer(r"\[(?:уточнить|TODO)\s*:\s*([^\]]+)\]", raw_body, re.I):
         add("blocking", "todo", f"требуется информация: {m.group(1)}", m.group(0))
     for m in re.finditer(r"\{\{\s*([A-Za-z0-9_.:-]+)\s*\}\}", raw_body):
         if m.group(1) not in ctx["facts"]:
             add("blocking", "unknown_ref", f"неизвестная ссылка {m.group(0)}", m.group(0))
-    if re.search(r"^\s*dear\b", raw_body, re.I | re.M) or re.search(r"yours (sincerely|faithfully)", raw_body, re.I):
+    if re.search(r"^\s*(dear\b|уважаем)", raw_body, re.I | re.M) or re.search(
+            r"yours (sincerely|faithfully)|с уважением", raw_body, re.I):
         add("warning", "duplicate_frame", "обращение/подпись в теле письма — они добавляются автоматически")
     words = len(re.findall(r"\w+", text))
     if words > 500:
