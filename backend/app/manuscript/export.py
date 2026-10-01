@@ -188,8 +188,9 @@ def package(ctx, draft, issues, run_dir, spec, results, extra_files):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("manuscript.docx", build_docx(ctx, draft, issues))
         z.writestr("manuscript.md", markdown(ctx))
-        tmp = run_dir / "export_figures"
-        tmp.mkdir(exist_ok=True)
+        tmp = run_dir / "export_figures" if ctx["figures"] else None
+        if tmp:
+            tmp.mkdir(exist_ok=True)
         ru = ctx.get("lang") == "ru"
         main = ctx.get("figure_language", "en")
         # a Russian journal wants the labels on figures in both languages: "Рис-1" plus an English "Рис-1_en"

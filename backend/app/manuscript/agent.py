@@ -95,6 +95,40 @@ KIND_INSTRUCTIONS = {
                    "Consistent British or American spelling.",
     "other": "Write this section according to the plan points.",
 }
+# A case report follows the CARE guidelines (Gagnier et al. 2013; Riley et al. 2017): the numbers are CARE items.
+CASE_PRESENTATION = (
+    "Case presentation (CARE 5–10), with '### ' subheadings in this order: Patient information (de-identified "
+    "demographics, main concerns and symptoms, relevant medical, family and psychosocial history, past "
+    "interventions); Clinical findings (relevant examination and imaging); Timeline (the course as a short "
+    "chronological list built from the dated intervals in the data, e.g. 'Month 0 — surgery'); Diagnostic "
+    "assessment (gross and microscopic findings, immunohistochemistry with clones where given, molecular tests, the "
+    "differential diagnosis and how it was excluded, diagnostic challenges, prognostic characteristics such as the "
+    "risk group); Therapeutic intervention (type, timing, changes); Follow-up and outcomes (length of follow-up, "
+    "outcome, adherence, adverse events). Use only the facts of the case (placeholders) and the case documents; never "
+    "add a finding that is not documented — write [уточнить: …] instead. Refer to the case table as {{TAB:t1}}.")
+CASE_INSTRUCTIONS = {
+    "introduction": "Introduction of a case report (CARE 4): briefly why this case is unique or instructive — the "
+                    "entity, what is known (with citations), the diagnostic pitfall or gap this case illustrates. "
+                    "One or two paragraphs; at most one sentence about the patient; no case details or numbers.",
+    "case_presentation": CASE_PRESENTATION,
+    "results": CASE_PRESENTATION,
+    "methods": "Materials and methods of a case report (only if the journal requires the section): the diagnostic "
+               "methods used for this case (fixation, staining, immunohistochemistry with antibodies and clones, "
+               "molecular methods) and the literature search, if one was made; no statistics.",
+    "discussion": "Discussion of a case report (CARE 11): what this case adds compared with published cases and the "
+                  "literature (citations required); the rationale for the diagnosis and the conclusions; the "
+                  "differential diagnosis in the light of the literature; a paragraph on the strengths and "
+                  "limitations of this report (a single case cannot establish frequency, causality or prognosis; "
+                  "length of follow-up; missing data) that starts with 'This report has limitations'; the main "
+                  "take-away lessons. Do not introduce new case data.",
+    "conclusion": "Conclusion of a case report (CARE 11): 1–3 sentences with the main take-away lesson(s) for "
+                  "practising pathologists; no citations; no generalisation beyond what one case can show.",
+    "abstract": "Abstract of a case report (CARE 3): introduction — what is unique and what it adds; the patient's main "
+                "concerns and important clinical findings; the main diagnoses, interventions and outcomes; conclusion "
+                "— the main take-away lesson. Structure and word limit from the journal template ('### <Heading>' "
+                "for each heading of a structured abstract). Fact placeholders for numbers; no citations.",
+}
+
 RU_NOTE = ("Write the section in Russian (the instructions above are in English only for brevity); a Russian "
            "structured abstract uses the journal's Russian headings.")
 
@@ -134,8 +168,11 @@ def _system(ctx, kind=None):
 
 def _instruction(ctx, kind):
     instr = KIND_INSTRUCTIONS.get(kind, KIND_INSTRUCTIONS["other"])
+    if ctx.get("case_report") and kind in CASE_INSTRUCTIONS:
+        instr = CASE_INSTRUCTIONS[kind]
     if _russian(ctx, kind):
-        instr = instr.replace("'This study has limitations'", "«Ограничения исследования»") + " " + RU_NOTE
+        instr = (instr.replace("'This study has limitations'", "«Ограничения исследования»")
+                 .replace("'This report has limitations'", "«Ограничения данного наблюдения»") + " " + RU_NOTE)
     return instr
 
 
@@ -144,6 +181,14 @@ def _facts_block(ctx):
 
 
 def _context_block(ctx):
+    if ctx.get("case_report"):
+        return json.dumps({
+            "journal": ctx.get("journal"), "article_type": "case report (CARE guidelines)",
+            "focus": ctx.get("focus"), "key_messages": ctx.get("key_messages"),
+            "case_documents_anonymised": ctx.get("case_documents"),
+            "tables": ctx.get("tables"), "accepted_citations": ctx.get("citations"),
+            "author_inputs": ctx.get("inputs"),
+        }, ensure_ascii=False, indent=1)
     return json.dumps({
         "journal": ctx.get("journal"), "article_type": ctx.get("article_type"),
         "focus": ctx.get("focus"), "series_size_tier": ctx.get("tier"),
@@ -212,6 +257,20 @@ PLAN_SCHEMA = {
 
 
 def make_plan(project, ctx, headings, word_limit):
+    if ctx.get("case_report"):
+        system = (
+            "You plan a pathology CASE REPORT (CARE guidelines) before any text is written. Build 1-3 key messages: "
+            "the take-away lessons of this case (what is unique, the diagnostic pitfall, what a pathologist should "
+            "remember). For each section heading given (keep them and their order) list 3-7 concrete points that "
+            "follow the CARE items (introduction — why the case is unique; case presentation — patient information, "
+            "clinical findings, timeline, diagnostic assessment, therapeutic intervention, follow-up and outcomes; "
+            "discussion — literature, rationale, strengths and limitations, lessons; conclusion — take-away) and a "
+            f"word budget; the main sections must sum to at most {word_limit or 'a typical case report (1500-2500 words)'}. "
+            "Choose tables by id (the case table t1). Points and rationale in Russian; key messages in "
+            + ("Russian (the article is written in Russian)" if ctx.get("lang") == "ru" else "English")
+            + ". Do not write numbers.")
+        user = f"Section headings: {headings}\n\nCase context:\n{_context_block(ctx)}"
+        return _call_plain(project, "plan", system, user, PLAN_SCHEMA)
     system = (
         "You plan a pathology manuscript before any text is written. Build 1-3 key messages from the accepted "
         "findings (respect evidence levels) and the confirmed novelty. For each section heading given (keep them and "
@@ -251,6 +310,10 @@ def front_matter(project, ctx, template, sections_text):
               + WRITING_RULES.split("\n- NUMBERS")[0].format(variant=ctx.get("language_variant") or "consistent",
                                                              tone=ctx.get("tone") or "precise"))
     user = f"Key messages: {ctx.get('key_messages')}\n\nManuscript sections:\n{sections_text}"
+    if ctx.get("case_report"):
+        system += ("\n\nThis is a case report (CARE 1–2): every title must name the area of focus and contain the "
+                   "words 'case report' (in Russian: «клиническое наблюдение»); 2-5 keywords, one of them 'case "
+                   "report' («клиническое наблюдение»).")
     if ctx.get("lang") == "ru":
         system += ("\n\nThe article is written in Russian: titles, running title, keywords and highlights in Russian; "
                    "titles_en — the English version of each title in the same order; keywords_en — the English "

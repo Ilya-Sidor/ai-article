@@ -138,6 +138,9 @@ def build(store, pid, ids, terms, lang="en"):
 
 def terms_needed(store, pid):
     """Variable names and levels that need English labels."""
+    from . import case
+    if case.is_case_report(store.get(pid)):
+        return case.terms_needed(case.case_data(store, pid))
     analysis = engine.latest(store, pid) or {}
     dictionary = {v["name"]: v for v in read_json(store.dir(pid) / "dictionary.json", [])}
     out = []

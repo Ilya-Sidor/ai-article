@@ -14,7 +14,8 @@ from .journals import checks as jchecks, store as journals
 from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
-from .manuscript import agent, assets, checks as mchecks, export, facts as mfacts, lang as mlang, statements
+from .manuscript import agent, assets, case as mcase, checks as mchecks, export, facts as mfacts, lang as mlang
+from .manuscript import statements
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -64,12 +65,14 @@ def _log_summary(analysis):
 def context(pid, state=None):
     project = store.get(pid)
     state = state or ms.load(store, pid)
-    analysis = engine.latest(store, pid) or {}
-    mfacts.assign_ids(state["ids"], analysis)
+    case_report = mcase.is_case_report(project)  # one patient: the case table instead of an analysis (CARE)
+    analysis = mcase.case_data(store, pid) if case_report else (engine.latest(store, pid) or {})
+    (mcase if case_report else mfacts).assign_ids(state["ids"], analysis)
     assets.sync(state, analysis)
     profile, template = _profile_template(project)
     lang = mlang.of(template)
-    built = mfacts.build(store, pid, state["ids"], state["terms"], lang)
+    built = (mcase.build(analysis, state["ids"], state["terms"], lang) if case_report
+             else mfacts.build(store, pid, state["ids"], state["terms"], lang))
     comps = _comparisons(pid)
     labels = {s["id"]: s["label"] for s in lit.sources(store, pid)}
     cits = [{"id": c["id"], "source": labels.get(c["source_id"]), "claim": c["claim"], "quote": c["quote"],
@@ -91,15 +94,17 @@ def context(pid, state=None):
     ctx = {
         "project": project, "analysis": analysis, "facts": built["facts"], "findings": findings,
         "variables": built["variables"], "template": template, "profile": profile, "lang": lang,
+        "case_report": case_report,
+        "case_documents": (analysis.get("case_report") or {}).get("documents") if case_report else None,
         "journal": project.get("journal"), "article_type": project["article_type"], "focus": project.get("focus"),
         "language_variant": (template or {}).get("language_variant"), "tone": (template or {}).get("tone"),
-        "tier": tier_for((analysis.get("summary") or {}).get("n", 0)).label if analysis else None,
-        "tier_code": tier_for((analysis.get("summary") or {}).get("n", 0)).code if analysis else None,
+        "tier": tier_for((analysis.get("summary") or {}).get("n", 0)).label if analysis and not case_report else None,
+        "tier_code": tier_for((analysis.get("summary") or {}).get("n", 0)).code if analysis and not case_report else None,
         "key_messages": (state.get("plan") or {}).get("key_messages"),
         "novelty": [f["novelty"] for f in findings if f["novelty"]], "citations": cits,
         "tables": [t for t in tables if t["include"]], "figures": [f for f in figures_ if f["include"]],
         "all_tables": tables, "all_figures": figures_,
-        "inputs": state.get("inputs"), "log": _log_summary(analysis) if analysis else None,
+        "inputs": state.get("inputs"), "log": _log_summary(analysis) if analysis and not case_report else None,
     }
     return ctx, state
 
@@ -151,6 +156,8 @@ def _check(pid, ctx, state, renderer):
     sections = [{"key": s["key"], "kind": s["kind"], "heading": s["heading"], "source": ms.current_source(s),
                  "whitelist": s.get("number_whitelist")} for s in ms.ordered(state)]
     inputs_text = json.dumps(state.get("inputs") or {}, ensure_ascii=False)
+    if ctx["case_report"]:  # numbers written in the case's own documents are the author's data too
+        inputs_text += " " + " ".join(ctx["case_documents"] or [])
     names = [v["label"] for v in ctx["variables"]] + [v["name"] for v in ctx["variables"]] + [
         lvl for t in state["terms"].values() for lvl in (t.get("levels") or {}).values()]
     issues, counts = mchecks.check(sections, renderer, ctx["facts"], ctx["findings"], ctx["template"],
@@ -160,6 +167,8 @@ def _check(pid, ctx, state, renderer):
         issues.append({"section": None, "heading": "терминология", "severity": "blocking", "code": "untranslated",
                        "message": "нет английского перевода: " + "; ".join(what), "fragment": "",
                        "suggestion": "«1. Терминология» → «Перевести автоматически» или впишите перевод"})
+    if ctx["case_report"]:
+        issues += mcase.care_issues(sections, renderer, state.get("front"), state.get("inputs"), ctx["template"])
     # citations used in the text must be decided and verified
     cit = {c["id"]: c for c in lit.citations(store, pid)}
     for s in sections:
@@ -233,7 +242,8 @@ def _view(pid, ctx, state):
         "issues": [i for i in issues if i["section"] is None], "counts": counts,
         "blocking": sum(1 for i in issues if i["severity"] == "blocking"),
         "template": ctx["template"], "has_analysis": bool(ctx["analysis"]),
-        "n_accepted_findings": len(ctx["findings"]),
+        "n_accepted_findings": len(ctx["findings"]), "case_report": ctx["case_report"],
+        "n_cases": (ctx["analysis"].get("summary") or {}).get("n") if ctx["case_report"] else None,
     }
 
 
@@ -252,7 +262,7 @@ def get_manuscript(pid: str):
 def auto_terms(pid: str):
     ctx, state = context(pid)
     if not mfacts.terms_needed(store, pid):
-        raise HTTPException(400, "сначала выполните анализ")
+        raise HTTPException(400, "сначала загрузите данные случая" if ctx["case_report"] else "сначала выполните анализ")
     _complete_terms(pid, ctx, state)
     return get_manuscript(pid)
 
@@ -307,9 +317,12 @@ def put_inputs(pid: str, inputs: dict):
 @router.post("/projects/{pid}/manuscript/plan")
 def generate_plan(pid: str):
     ctx, state = context(pid)
-    if not ctx["analysis"]:
+    if ctx["case_report"]:
+        if not ctx["analysis"]:
+            raise HTTPException(400, "сначала загрузите данные случая и подтвердите анонимизацию")
+    elif not ctx["analysis"]:
         raise HTTPException(400, "сначала выполните анализ")
-    if not ctx["findings"]:
+    elif not ctx["findings"]:
         raise HTTPException(400, "нет принятых находок — примите находки на шаге «Анализ»")
     headings = _headings(ctx["project"], ctx["template"], {"plan": None})
     ctx["tables"], ctx["figures"] = ctx["all_tables"], ctx["all_figures"]  # the plan chooses among all
@@ -766,7 +779,7 @@ def do_export(pid: str, mode: str = "draft"):
     ctx, state, renderer = st["ctx"], st["state"], st["renderer"]
     analysis = ctx["analysis"]
     if not analysis:
-        raise HTTPException(400, "нет результатов анализа")
+        raise HTTPException(400, "нет данных случая" if ctx["case_report"] else "нет результатов анализа")
     lang = ctx["lang"]
     tables = [assets.table_data(t, analysis, state["terms"], lang) for t in state["tables"] if t["include"]]
     figures_ = [assets.figure_data(f, analysis, state["terms"], lang) for f in state["figures"] if f["include"]]
@@ -779,19 +792,23 @@ def do_export(pid: str, mode: str = "draft"):
             "figures": figures_, "counts": st["counts"], "authors": (state.get("inputs") or {}).get("authors"),
             "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"], "lang": lang,
             "figure_language": _figure_language(ctx, state)}
-    run_dir = engine.run_dir_latest(store, pid)
-    extra = {
-        "supplementary/cases_anonymized.csv": supplementary_csv(pid),
-        "supplementary/analysis.py": read_bytes(run_dir / "analysis.py"),
-        "supplementary/analysis_data.csv": read_bytes(run_dir / "analysis_data.csv"),
-        "supplementary/hypothesis_log.json": read_bytes(run_dir / "hypotheses.json"),
-    }
+    if ctx["case_report"]:
+        # no statistics to reproduce; the record of a single patient is not shared as supplementary data
+        run_dir, spec, results, extra = None, None, {}, {}
+    else:
+        run_dir = engine.run_dir_latest(store, pid)
+        spec, results = read_json(run_dir / "spec.json"), read_json(run_dir / "results.json", {})
+        extra = {
+            "supplementary/cases_anonymized.csv": supplementary_csv(pid),
+            "supplementary/analysis.py": read_bytes(run_dir / "analysis.py"),
+            "supplementary/analysis_data.csv": read_bytes(run_dir / "analysis_data.csv"),
+            "supplementary/hypothesis_log.json": read_bytes(run_dir / "hypotheses.json"),
+        }
     from .cover_api import letter_docx
     letter = letter_docx(pid, draft=mode != "final")
     if letter:
         extra["cover_letter.docx"] = letter
-    data = export.package(ectx, mode != "final", st["blocking"] + st["warnings"], run_dir,
-                          read_json(run_dir / "spec.json"), read_json(run_dir / "results.json", {}), extra)
+    data = export.package(ectx, mode != "final", st["blocking"] + st["warnings"], run_dir, spec, results, extra)
     store.audit(pid, "author", "manuscript.exported", {"mode": mode, "blocking": len(st["blocking"])})
     name = "manuscript_submission.zip" if mode == "final" else "manuscript_DRAFT.zip"
     return Response(data, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})

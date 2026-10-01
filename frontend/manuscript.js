@@ -11,7 +11,9 @@ async function viewDraft(root, p) {
 function viewDraftRender(root, p, m, reloadArg) {
   const reload = reloadArg || (async (fresh) => viewDraftRender(root, p, fresh || await api(`/projects/${p.id}/manuscript`)));
   if (!m.has_analysis) {
-    root.replaceChildren(el("div", { class: "card empty" }, "Сначала выполните анализ. ", el("a", { href: `#/p/${p.id}/analysis`, text: "К анализу" })));
+    root.replaceChildren(m.case_report
+      ? el("div", { class: "card empty" }, "Сначала загрузите данные случая и подтвердите анонимизацию. ", el("a", { href: `#/p/${p.id}/data`, text: "К данным" }))
+      : el("div", { class: "card empty" }, "Сначала выполните анализ. ", el("a", { href: `#/p/${p.id}/analysis`, text: "К анализу" })));
     return;
   }
   const approved = m.plan && m.plan.status === "approved";
@@ -30,7 +32,7 @@ function viewDraftRender(root, p, m, reloadArg) {
     el("span", { class: "badge " + (m.blocking ? "danger" : "ok"), text: m.blocking ? `блокирующих замечаний: ${m.blocking}` : "блокирующих замечаний нет" }));
   const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront }[state.msTab](p, m, reload);
   root.replaceChildren(el("div", { class: "stack" },
-    el("div", { class: "banner info small", text: "Числа в тексте — ссылки на результаты анализа ({{…}}), их подставляет код. Цитаты — только проверенные фрагменты базы литературы. Каждый раздел: черновик → правки → принятие; все версии сохраняются." }),
+    el("div", { class: "banner info small", text: (m.case_report ? "Case report по руководству CARE. Числа и признаки в тексте — ссылки на данные случая ({{…}}), их подставляет код." : "Числа в тексте — ссылки на результаты анализа ({{…}}), их подставляет код.") + " Цитаты — только проверенные фрагменты базы литературы. Каждый раздел: черновик → правки → принятие; все версии сохраняются." }),
     el("div", { class: "card", style: "padding:12px 16px" }, counters),
     el("div", {}, bar, body)));
 }
@@ -98,8 +100,12 @@ function msInputs(p, m, reload) {
   };
   const save = el("button", { class: "primary", text: "Сохранить" });
   save.addEventListener("click", () => busy(save, async () => { reload(await api(`/projects/${p.id}/manuscript/inputs`, { method: "PUT", json: inp })); toast("Сохранено"); }));
-  return el("div", { class: "stack" },
-    el("div", { class: "card stack" }, el("h3", { text: "Материал и дизайн (для Materials and methods)" }),
+  const caseCard = m.case_report ? el("div", { class: "card stack" }, el("h3", { text: "Case report (CARE)" }),
+    el("p", { class: "hint small", text: "CARE 13: для публикации описания пациента нужно его письменное информированное согласие — укажите его ниже в «Заявлениях». Если согласие получить нельзя, выберите «не требовалось» и укажите обоснование (например, разрешение этического комитета)." }),
+    field("Обоснование отсутствия согласия (если согласия нет)", "consent.details", { textarea: true }),
+    field("Мнение пациента (CARE 12, необязательно) — как пациент воспринял лечение и исход, своими словами", "patient_perspective", { textarea: true })) : null;
+  return el("div", { class: "stack" }, caseCard,
+    m.case_report ? null : el("div", { class: "card stack" }, el("h3", { text: "Материал и дизайн (для Materials and methods)" }),
       el("div", { class: "form-grid" }, field("Учреждение / архив", "study.institution"), field("Период", "study.period", { placeholder: "2016–2022" }),
         field("Пересмотр препаратов", "study.review", { placeholder: "all cases reviewed by two pathologists" })),
       field("Критерии отбора", "study.selection", { textarea: true }),
@@ -126,12 +132,15 @@ function msInputs(p, m, reload) {
 
 function msPlan(p, m, reload) {
   const plan = m.plan ? JSON.parse(JSON.stringify(m.plan)) : null;
-  const gen = el("button", { class: plan ? "" : "primary", text: plan ? "Сгенерировать заново" : "Сгенерировать план", disabled: !state.meta.llm.available || !m.n_accepted_findings,
-    title: !m.n_accepted_findings ? "примите находки на шаге «Анализ»" : state.meta.llm.available ? state.meta.llm.reasoning_model : state.meta.llm.reason });
+  const canPlan = m.case_report || m.n_accepted_findings;
+  const gen = el("button", { class: plan ? "" : "primary", text: plan ? "Сгенерировать заново" : "Сгенерировать план", disabled: !state.meta.llm.available || !canPlan,
+    title: !canPlan ? "примите находки на шаге «Анализ»" : state.meta.llm.available ? state.meta.llm.reasoning_model : state.meta.llm.reason });
   gen.addEventListener("click", () => busy(gen, async () => reload(await api(`/projects/${p.id}/manuscript/plan`, { method: "POST" }))));
   if (!plan) {
     return el("div", { class: "card stack" },
-      el("p", { text: `Принятых находок: ${m.n_accepted_findings}. План строится из них, подтверждённой новизны и профиля журнала: ключевые сообщения, тезисы по разделам, бюджет слов, таблицы и рисунки (FR-5.1).` }),
+      el("p", { text: m.case_report
+        ? `Case report (пациентов: ${m.n_cases}). План строится по данным случая, документам и руководству CARE: ключевые уроки случая, тезисы по разделам (сведения о пациенте, клинические данные, хронология, диагностика, лечение, исход, обсуждение), бюджет слов.`
+        : `Принятых находок: ${m.n_accepted_findings}. План строится из них, подтверждённой новизны и профиля журнала: ключевые сообщения, тезисы по разделам, бюджет слов, таблицы и рисунки (FR-5.1).` }),
       el("div", {}, gen));
   }
   const msgs = el("textarea", { style: "min-height:70px" }, plan.key_messages.join("\n"));

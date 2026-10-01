@@ -268,15 +268,18 @@ function stepState(p, id) {
   const stageIdx = { created: 1, data_pending: 1, data_confirmed: 3, analysis: 4 }[p.stage] || 1;
   const idx = STEPS.findIndex((s) => s.id === id) + 1;
   if (STEPS[idx - 1].soon) return "locked";
+  // a case report has no statistics: the confirmed case data is enough for the manuscript (CARE)
+  const caseReport = p.article_type === "case_report";
+  const ready = p.stage === "analysis" || (caseReport && stageIdx >= 3);
   if (idx === 1) return "done";
   if (idx === 2) return p.anonymization.status === "confirmed" ? "done" : "open";
   if (idx === 3) return stageIdx >= 3 ? "done" : "locked";
-  if (idx === 4) return stageIdx >= 3 ? (p.stage === "analysis" ? "done" : "open") : "locked";
+  if (idx === 4) return stageIdx >= 3 ? (ready ? "done" : "open") : "locked";
   if (idx === 5) return "open";
   if (idx === 6) return p.journal_id ? "open" : "locked";
-  if (idx === 8) return p.journal_id || p.stage === "analysis" ? "open" : "locked";
-  if (idx === 7 || idx === 10) return p.stage === "analysis" ? "open" : "locked";
-  if (idx === 9) return p.stage === "analysis" && p.journal_id ? "open" : "locked";
+  if (idx === 8) return p.journal_id || ready ? "open" : "locked";
+  if (idx === 7 || idx === 10) return ready ? "open" : "locked";
+  if (idx === 9) return ready && p.journal_id ? "open" : "locked";
   return "locked";
 }
 
@@ -556,6 +559,16 @@ function dictionaryEditor(p, ds) {
 async function viewAnalysis(root, p) {
   if (p.anonymization.status !== "confirmed") {
     root.replaceChildren(el("div", { class: "card empty" }, "Анализ доступен после подтверждения анонимизации. ", el("a", { href: `#/p/${p.id}/data`, text: "К данным" })));
+    return;
+  }
+  if (p.article_type === "case_report") {
+    root.replaceChildren(el("div", { class: "card stack" },
+      el("h2", { text: "Case report: статистический анализ не проводится" }),
+      el("p", { text: "Для описания одного пациента (до 5) статистика не нужна. Статья строится по данным случая из шага «Структурирование» и по международному руководству CARE (CAse REport guidelines): сведения о пациенте, клинические данные, хронология, диагностика, лечение, наблюдение и исход, обсуждение с ограничениями и выводами, согласие пациента." }),
+      el("p", { class: "hint", text: "Значения признаков случая становятся ссылками на факты — числа в тексте берутся из ваших данных. Тексты заключений и эпикризов (обезличенные) служат источником для описания случая." }),
+      el("div", { class: "row" }, el("a", { class: "btn", href: `#/p/${p.id}/cases`, text: "← Данные случая" }),
+        el("a", { class: "btn primary", href: `#/p/${p.id}/literature`, text: "Литература →" }),
+        el("a", { class: "btn", href: `#/p/${p.id}/draft`, text: "Генерация разделов →" }))));
     return;
   }
   const res = await api(`/projects/${p.id}/analysis`);

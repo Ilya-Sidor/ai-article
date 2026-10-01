@@ -20,6 +20,10 @@ def sync(state, analysis):
     fmap = state.get("ids", {}).get("findings", {})
     tables = {t["id"]: t for t in state.get("tables", [])}
     figures = {f["id"]: f for f in state.get("figures", [])}
+    if analysis.get("case_report"):  # a case report: one table with the features of the case, no plots
+        tables.setdefault("t1", {"id": "t1", "kind": "case_data", "include": True, "caption": None})
+        state["tables"], state["figures"] = list(tables.values()), list(figures.values())
+        return state
     if analysis.get("table1"):
         tables.setdefault("t1", {"id": "t1", "kind": "table1", "include": True, "caption": None})
     for f in analysis.get("findings", []):
@@ -48,6 +52,13 @@ def default_caption(item, analysis, terms, kind, lang="en"):
     ru = lang == "ru"
     if item["kind"] == "table1":
         return "Клинико-морфологическая характеристика серии" if ru else "Clinicopathological characteristics of the series"
+    if item["kind"] == "case_data":
+        n = (analysis.get("summary") or {}).get("n", 1)
+        if ru:
+            return "Клинические, морфологические, иммуногистохимические и молекулярные данные " + (
+                "наблюдения" if n == 1 else "наблюдений")
+        return "Clinical, morphological, immunohistochemical and molecular features of the " + (
+            "case" if n == 1 else "cases")
     if item["kind"] == "heatmap":
         return ("Иерархическая кластеризация случаев без учителя (расстояние Гауэра, средняя связь). Столбцы — "
                 "признаки от низких (светлые) до высоких (тёмные) значений; серый — нет данных." if ru else
@@ -87,6 +98,12 @@ def table_data(item, analysis, terms, lang="en"):
     n = (analysis.get("summary") or {}).get("n")
     caption = item.get("caption") or default_caption(item, analysis, terms, "table", lang)
     caption_en = item.get("caption_en") or default_caption(item, analysis, terms, "table", "en")
+    if item["kind"] == "case_data":
+        from .case import table
+        cols, rows = table(analysis, terms, lang)
+        rows = [[L.number(c, lang) for c in r] for r in rows]
+        return {"caption": caption, "caption_en": caption_en, "columns": cols, "rows": rows,
+                "footnote": "Данные обезличены." if ru else "Data are de-identified."}
     if item["kind"] == "table1":
         rows = []
         for v in analysis.get("table1", []):

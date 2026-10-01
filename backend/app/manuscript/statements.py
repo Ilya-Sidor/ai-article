@@ -150,6 +150,8 @@ def build(pid, inputs, template, lang="en"):
         parts.append(("Author contributions (CRediT)", body))
     if wanted("acknowledgements") and inputs.get("acknowledgements"):
         parts.append(("Acknowledgements", inputs["acknowledgements"]))
+    if inputs.get("patient_perspective"):  # CARE 12 (case reports)
+        parts.append(("Patient perspective", inputs["patient_perspective"]))
     if wanted("ai_disclosure"):
         parts.append(("Declaration of generative AI use", ai_statement(pid)))
     return "\n\n".join(f"### {h}\n\n{b}" for h, b in parts)
@@ -209,6 +211,8 @@ def build_ru(pid, inputs, template):
         parts.append(("Участие авторов", body))
     if wanted("acknowledgements") and inputs.get("acknowledgements"):
         parts.append(("Благодарности", inputs["acknowledgements"]))
+    if inputs.get("patient_perspective"):  # CARE 12 (case reports)
+        parts.append(("Мнение пациента", inputs["patient_perspective"]))
     if wanted("ai_disclosure"):
         parts.append(("Использование инструментов ИИ", ai_statement_ru(pid)))
     return "\n\n".join(f"### {h}\n\n{b}" for h, b in parts)
