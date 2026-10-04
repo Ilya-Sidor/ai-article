@@ -15,7 +15,7 @@ from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
 from .manuscript import agent, assets, case as mcase, checks as mchecks, export, facts as mfacts, lang as mlang
-from .manuscript import statements
+from .manuscript import fixes, statements
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -176,11 +176,12 @@ def _check(pid, ctx, state, renderer):
             c = cit.get(m.group(0))
             if c and c["decision"] == "pending":
                 issues.append({"section": s["key"], "heading": s["heading"], "severity": "blocking",
-                               "code": "citation_pending", "message": f"{c['id']}: цитата ожидает решения автора",
+                               "code": "citation_pending", "citation": c["id"],
+                               "message": f"{c['id']}: цитата ожидает решения автора",
                                "fragment": c["quote"][:200], "suggestion": "примите или отклоните на шаге «Литература»"})
             elif c and c["decision"] == "accepted" and c["verification"]["status"] != "supported":
                 issues.append({"section": s["key"], "heading": s["heading"], "severity": "blocking",
-                               "code": "citation_unverified",
+                               "code": "citation_unverified", "citation": c["id"],
                                "message": f"{c['id']}: проверка — {c['verification']['status']}",
                                "fragment": c["quote"][:200], "suggestion": "перепроверьте или замените цитату"})
     front = state.get("front") or {}
@@ -208,6 +209,7 @@ def manuscript_counts(pid):
 def _view(pid, ctx, state):
     renderer = _renderer(pid, ctx, state)
     issues, counts = _check(pid, ctx, state, renderer)
+    issues = fixes.annotate_all(issues, state)
     fps = _fingerprints(ctx, state)
     sections = []
     budgets = _budgets(state)
@@ -496,6 +498,26 @@ def generate_section(pid: str, key: str):
     return get_manuscript(pid)
 
 
+class ReplaceIn(BaseModel):
+    find: str = Field(min_length=1, max_length=2000)
+    replace: str = Field(default="", max_length=5000)
+
+
+@router.post("/projects/{pid}/manuscript/sections/{key}/replace")
+def replace_in_section(pid: str, key: str, body: ReplaceIn):
+    """Quick fixes from the list of issues: fill an [уточнить: …] gap, drop a dead reference."""
+    state = ms.load(store, pid)
+    sec = _section(state, key)
+    source = ms.current_source(sec)
+    if body.find not in source:
+        raise HTTPException(400, "этот фрагмент уже исправлен или изменён — обновите страницу")
+    text = re.sub(r"[ \t]{2,}", " ", source.replace(body.find, body.replace.strip(), 1))
+    ms.add_version(state, key, text, "author", "исправление из списка замечаний")
+    ms.save(store, pid, state)
+    store.audit(pid, "author", "manuscript.quick_fix", {"section": key})
+    return get_manuscript(pid)
+
+
 class SourceIn(BaseModel):
     source: str = Field(max_length=200_000)
     note: str = "правка автора"
@@ -757,6 +779,7 @@ def export_status(pid):
     blocking += [i for i in cover_issues if i["severity"] == "blocking"]
     issues = issues + [i for i in cover_issues if i["severity"] != "blocking"]
     warnings = [i for i in issues if i["severity"] == "warning"]
+    blocking, warnings = fixes.annotate_all(blocking, state), fixes.annotate_all(warnings, state)
     return {"blocking": blocking, "warnings": warnings, "counts": counts, "ctx": ctx, "state": state,
             "renderer": renderer}
 

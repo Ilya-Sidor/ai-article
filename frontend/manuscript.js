@@ -18,7 +18,7 @@ function viewDraftRender(root, p, m, reloadArg) {
   }
   const approved = m.plan && m.plan.status === "approved";
   const tabs = [["terms", "1. Терминология"], ["inputs", "2. Данные автора"], ["plan", "3. План"], ["assets", "4. Таблицы и рисунки"],
-    ["sections", "5. Разделы"], ["front", "6. Название и ключевые слова"]];
+    ["sections", "5. Разделы"], ["front", "6. Название и ключевые слова"], ["fix", "Что исправить"]];
   if (!state.msTab) state.msTab = approved ? "sections" : "plan";
   const bar = el("div", { class: "tabs" }, tabs.map(([id, label]) => el("button", {
     class: "tab" + (state.msTab === id ? " active" : ""), text: label, disabled: id === "sections" && !approved,
@@ -29,12 +29,101 @@ function viewDraftRender(root, p, m, reloadArg) {
     el("span", {}, "Основной текст: ", el("strong", { text: `${c.words ?? 0}` }), ` / ${lim.words_total ?? "—"} слов`),
     el("span", {}, m.lang === "ru" ? "Резюме: " : "Abstract: ", el("strong", { text: `${c.abstract_words ?? 0}` }), ` / ${m.template?.abstract?.words ?? "—"}`),
     el("span", { text: `Таблиц: ${c.tables ?? 0} · рисунков: ${c.figures ?? 0} · ссылок: ${c.references ?? 0}` }),
-    el("span", { class: "badge " + (m.blocking ? "danger" : "ok"), text: m.blocking ? `блокирующих замечаний: ${m.blocking}` : "блокирующих замечаний нет" }));
-  const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront }[state.msTab](p, m, reload);
+    m.blocking
+      ? el("button", { class: "badge danger", style: "border:none;cursor:pointer", text: `блокирующих замечаний: ${m.blocking} — показать и исправить`,
+          onclick: () => { state.msTab = "fix"; viewDraftRender(root, p, m, reload); } })
+      : el("span", { class: "badge ok", text: "блокирующих замечаний нет" }));
+  const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront,
+    fix: (pp) => msFix(pp, () => reload()) }[state.msTab](p, m, reload);
   root.replaceChildren(el("div", { class: "stack" },
     el("div", { class: "banner info small", text: (m.case_report ? "Case report по руководству CARE. Числа и признаки в тексте — ссылки на данные случая ({{…}}), их подставляет код." : "Числа в тексте — ссылки на результаты анализа ({{…}}), их подставляет код.") + " Цитаты — только проверенные фрагменты базы литературы. Каждый раздел: черновик → правки → принятие; все версии сохраняются." }),
     el("div", { class: "card", style: "padding:12px 16px" }, counters),
     el("div", {}, bar, body)));
+}
+
+/* ---------- issues: where and how to fix (fix descriptors come from backend/app/manuscript/fixes.py) ---------- */
+
+function gotoFix(p, goto) {
+  if (!goto) return;
+  if (goto.step === "draft") {
+    state.msTab = goto.tab || "sections";
+    if (goto.section) { state.msSection = goto.section; state.msView = "preview"; }
+  }
+  const hash = `#/p/${p.id}/${goto.step}`;
+  if (location.hash === hash) route(); else location.hash = hash;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function issueRow(p, i, after) {
+  const [cls, label] = SEVERITY[i.severity] || SEVERITY.info;
+  const fix = i.fix || { actions: [] };
+  const sectionOf = (a) => a.section || i.section || (fix.goto && fix.goto.section);
+  const base = (a) => `/projects/${p.id}/manuscript/sections/${sectionOf(a)}`;
+  const run = (btn, fn) => busy(btn, async () => { await fn(); toast("Готово"); await after(); });
+  const handlers = {
+    remove: (a) => api(`${base(a)}/replace`, { json: { find: a.find, replace: "" } }),
+    whitelist: (a) => api(`${base(a)}/whitelist`, { json: { number: a.number } }),
+    revise: (a) => api(`${base(a)}/revise`, { json: { instruction: a.instruction, selection: a.selection || null } }),
+    accept: (a) => api(`${base(a)}/accept`, { method: "POST" }),
+    auto_terms: () => api(`/projects/${p.id}/manuscript/terms/auto`, { method: "POST" }),
+    citation: (a) => api(`/projects/${p.id}/literature/citations/${a.id}`, { json: { decision: a.decision } }),
+    verify: (a) => api(`/projects/${p.id}/literature/citations/${a.id}/verify`, { method: "POST" }),
+    consent: async () => {
+      const cur = await api(`/projects/${p.id}/manuscript`);
+      const inputs = { ...(cur.inputs || {}) };
+      inputs.consent = { ...(inputs.consent || {}), status: "written" };
+      return api(`/projects/${p.id}/manuscript/inputs`, { method: "PUT", json: inputs });
+    },
+  };
+  const controls = fix.actions.map((a) => {
+    if (a.type === "fill") {  // fill an [уточнить: …] gap right here
+      const input = el("input", { placeholder: a.placeholder, style: "min-width:260px;flex:1" });
+      const btn = el("button", { class: "small primary", text: a.label });
+      btn.addEventListener("click", () => {
+        if (!input.value.trim()) { input.focus(); return; }
+        run(btn, () => api(`${base(a)}/replace`, { json: { find: a.find, replace: input.value } }));
+      });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
+      return el("div", { class: "row", style: "flex:1" }, input, btn);
+    }
+    if (a.type === "goto") return el("button", { class: "small", text: a.label, onclick: () => gotoFix(p, a.goto) });
+    const btn = el("button", { class: "small" + (a.type === "revise" || a.type === "auto_terms" ? " primary" : ""), text: a.label,
+      disabled: ["revise", "auto_terms"].includes(a.type) && !state.meta.llm.available,
+      title: a.instruction || "" });
+    btn.addEventListener("click", () => run(btn, () => handlers[a.type](a)));
+    return btn;
+  });
+  const open = fix.goto ? el("button", { class: "small ghost", text: "Открыть место →", onclick: () => gotoFix(p, fix.goto) }) : null;
+  return el("div", { class: "issue-row" },
+    el("div", { class: "row", style: "gap:8px;align-items:baseline" }, el("span", { class: "badge " + cls, text: label }),
+      el("strong", { class: "small", text: fix.where || i.heading || "" }), el("span", { text: i.message })),
+    i.fragment ? el("div", { class: "small muted mono issue-fragment", text: i.fragment }) : null,
+    i.suggestion ? el("div", { class: "small", text: "→ " + i.suggestion }) : null,
+    controls.length || open ? el("div", { class: "row", style: "gap:6px;margin-top:4px" }, ...controls, open) : null);
+}
+
+function issuesByPlace(p, issues, after) {
+  const groups = new Map();
+  for (const i of issues) {
+    const key = (i.fix && i.fix.where) || i.heading || "Прочее";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  }
+  return [...groups.entries()].map(([place, items]) => el("div", { class: "stack", style: "gap:6px" },
+    el("h4", { text: `${place} (${items.length})` }), items.map((i) => issueRow(p, i, after))));
+}
+
+function msFix(p, rerender) {
+  const box = el("div", { class: "card stack" }, el("p", { class: "hint", text: "Собираю замечания…" }));
+  api(`/projects/${p.id}/manuscript/export/status`).then((st) => {
+    box.replaceChildren(
+      el("h3", { text: st.blocking.length ? `Что нужно исправить перед подачей (${st.blocking.length})` : "Блокирующих замечаний нет — рукопись готова к подаче" }),
+      el("p", { class: "hint small", text: "Замечания сгруппированы по месту. Исправляйте прямо здесь: впишите недостающее, подтвердите число, примите цитату или поручите ИИ переписать фрагмент; «Открыть место» переходит к нужному разделу или шагу." }),
+      ...issuesByPlace(p, st.blocking, rerender),
+      st.warnings.length ? el("details", {}, el("summary", { text: `Предупреждения — не блокируют подачу (${st.warnings.length})` }),
+        el("div", { class: "stack", style: "margin-top:8px" }, ...issuesByPlace(p, st.warnings, rerender))) : null);
+  }).catch((e) => box.replaceChildren(el("div", { class: "banner warn", text: e.message })));
+  return box;
 }
 
 /* ---------- 1. terminology ---------- */
@@ -292,15 +381,9 @@ function sectionEditor(p, m, s, reload) {
     save.addEventListener("click", () => busy(save, async () => reload(await api(`/projects/${p.id}/manuscript/sections/${s.key}`, { method: "PUT", json: { source: textarea.value } }))));
     body = el("div", { class: "stack" }, el("div", { class: "row" }, factSel, citSel, refSel), textarea, el("div", {}, save));
   } else if (state.msView === "issues") {
-    body = s.issues.length ? el("div", { class: "stack" }, s.issues.map((i) => {
-      const [cls, label] = SEVERITY[i.severity];
-      const num = i.code === "number_unmatched" ? (i.message.match(/число (\S+)/) || [])[1] : null;
-      return el("div", { class: "row", style: "align-items:flex-start;flex-wrap:nowrap;border-bottom:1px solid var(--border);padding:6px 0" },
-        el("span", { class: "badge " + cls, text: label }),
-        el("div", { class: "grow" }, el("div", { text: i.message }), i.fragment ? el("div", { class: "small muted mono", text: i.fragment }) : null,
-          i.suggestion ? el("div", { class: "small", text: "→ " + i.suggestion }) : null),
-        num ? el("button", { class: "small", text: "Проверено вручную", onclick: () => post("/whitelist", { number: num }) }) : null);
-    })) : el("p", { class: "hint", text: "Замечаний нет." });
+    body = s.issues.length ? el("div", { class: "stack" }, s.issues.map((i) =>
+      issueRow(p, i, async () => reload(await api(`/projects/${p.id}/manuscript`)))))
+      : el("p", { class: "hint", text: "Замечаний нет." });
   } else if (state.msView === "versions") {
     const out = el("pre", { class: "small", style: "white-space:pre-wrap;max-height:360px;overflow:auto" });
     body = el("div", { class: "stack" }, el("div", { class: "table-wrap", style: "max-height:300px" }, el("table", {}, el("tbody", {},
@@ -393,16 +476,15 @@ async function viewExport(root, p) {
   draftBtn.addEventListener("click", () => download("draft", draftBtn));
   const finalBtn = el("button", { class: "primary", text: "Скачать пакет для подачи (.zip)", disabled: !st.ready });
   finalBtn.addEventListener("click", () => download("final", finalBtn));
-  const groups = {};
-  for (const b of st.blocking) (groups[b.heading || "—"] = groups[b.heading || "—"] || []).push(b);
   root.replaceChildren(el("div", { class: "stack" },
     el("div", { class: "card stack" }, el("h2", { text: "Экспорт (FR-5.13)" }),
       el("p", { class: "hint", text: "Пакет: manuscript.docx (Times New Roman 12, двойной интервал, нумерация строк и страниц), manuscript.md, рисунки в формате и разрешении журнала, supplementary (анонимизированная таблица случаев, скрипт анализа, журнал гипотез)." }),
       el("div", { class: "row" }, draftBtn, finalBtn),
       st.ready ? el("div", { class: "banner ok", text: "Блокирующих проблем нет — рукопись готова к подаче." })
         : el("div", { class: "banner warn", text: `Экспорт для подачи заблокирован: ${st.blocking.length}. Черновик доступен всегда — с пометкой DRAFT и списком открытых вопросов.` })),
-    st.blocking.length ? el("div", { class: "card stack" }, el("h3", { text: "Что нужно решить" }),
-      Object.entries(groups).map(([g, items]) => el("div", {}, el("h4", { text: g }), el("ul", { class: "small" }, items.map((i) => el("li", {}, i.message, i.fragment ? el("span", { class: "muted", text: ` — ${i.fragment.slice(0, 120)}` }) : null)))))) : null,
+    st.blocking.length ? el("div", { class: "card stack" }, el("h3", { text: `Что нужно решить (${st.blocking.length})` }),
+      el("p", { class: "hint small", text: "Исправляйте прямо здесь или нажмите «Открыть место»." }),
+      ...issuesByPlace(p, st.blocking, () => viewExport(root, p))) : null,
     st.warnings.length ? el("details", { class: "card" }, el("summary", { text: `Предупреждения (${st.warnings.length})` }),
-      el("ul", { class: "small" }, st.warnings.map((w) => el("li", { text: `${w.heading}: ${w.message}` })))) : null));
+      el("div", { class: "stack", style: "margin-top:8px" }, ...issuesByPlace(p, st.warnings, () => viewExport(root, p)))) : null));
 }

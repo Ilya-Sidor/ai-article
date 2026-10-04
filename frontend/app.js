@@ -826,7 +826,7 @@ async function loadMeta() {
   const s = state.meta.llm;
   document.getElementById("llm-status").replaceChildren(
     el("span", { class: "dot " + (s.available ? "on" : "off") }),
-    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `${{ gemini: "Gemini", free: "ИИ (бесплатно)", openrouter: "OpenRouter" }[s.provider] || "Claude"}: ${s.reasoning_model}${s.extraction_model !== s.reasoning_model ? " / " + s.extraction_model : ""}`)
+    s.available ? (s.local ? `ИИ локально: ${s.reasoning_model}` : `${{ gemini: "Gemini", free: "ИИ (бесплатно)", openrouter: "OpenRouter", deepseek: "DeepSeek" }[s.provider] || "Claude"}: ${s.reasoning_model}${s.extraction_model !== s.reasoning_model ? " / " + s.extraction_model : ""}`)
       : `ИИ-функции отключены: ${s.reason || "модель не настроена"}`);
 }
 
@@ -1046,6 +1046,14 @@ async function aiSettingsCard() {
       placeholder: conf ? `ключ сохранён (${hint}) — введите новый, чтобы заменить` : placeholder });
     const gKey = keyInput(v.gemini.configured, v.gemini.key_hint, "ключ из Google AI Studio");
     const oKey = keyInput(v.openrouter.configured, v.openrouter.key_hint, "ключ из OpenRouter (sk-or-…)");
+    const dKey = keyInput(v.deepseek.configured, v.deepseek.key_hint, "ключ DeepSeek (sk-…)");
+    const deepseekBox = el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "DeepSeek" }),
+      el("p", { class: "hint small" }, `Модели: ${v.deepseek.models.reasoning} (анализ и текст, с рассуждением), ${v.deepseek.models.extraction} (извлечение и проверки). Ключ: `,
+        el("a", { href: "https://platform.deepseek.com/api_keys", target: "_blank", rel: "noopener", text: "platform.deepseek.com → API keys" }),
+        ". Оплата по факту использования (пополните баланс)."),
+      v.deepseek.key_in_file ? el("div", { class: "banner ok small", text: `Ключ взят из файла ${v.deepseek.key_file}` })
+        : el("p", { class: "hint small", text: `Ключ можно не вставлять сюда, а сохранить из Терминала в файл ${v.deepseek.key_file}.` }),
+      dKey);
     const chainR = el("textarea", { style: "min-height:150px;font-family:var(--mono);font-size:12px" }, v.chains.reasoning.join("\n"));
     const chainE = el("textarea", { style: "min-height:150px;font-family:var(--mono);font-size:12px" }, v.chains.extraction.join("\n"));
     const modelSel = (current) => el("select", {}, v.gemini.models.map((m) => el("option", { value: m, selected: current === m, text: m })));
@@ -1061,11 +1069,24 @@ async function aiSettingsCard() {
           el("button", { class: "small ghost", text: "по умолчанию", onclick: () => { chainE.value = v.chains.default_extraction.join("\n"); } }))),
       v.openrouter.free_models.length ? el("details", {}, el("summary", { text: `Бесплатные модели OpenRouter сейчас (${v.openrouter.free_models.length})` }),
         el("ul", { class: "small mono" }, v.openrouter.free_models.map((m) => el("li", {}, "openrouter:" + m.id, m.structured ? el("span", { class: "badge ok", style: "margin-left:6px", text: "JSON-схема" }) : el("span", { class: "badge", style: "margin-left:6px", text: "JSON по инструкции" }))))) : null);
+    const freeKeys = el("div", { class: "form-grid" },
+        el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "Google Gemini" }),
+          el("p", { class: "hint small" }, "Ключ: ", el("a", { href: "https://aistudio.google.com/apikey", target: "_blank", rel: "noopener", text: "AI Studio → Get API key" })),
+          gKey),
+        el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "OpenRouter" }),
+          el("p", { class: "hint small" }, "Ключ: ", el("a", { href: "https://openrouter.ai/settings/keys", target: "_blank", rel: "noopener", text: "openrouter.ai → Keys" }),
+            ". В ", el("a", { href: "https://openrouter.ai/settings/privacy", target: "_blank", rel: "noopener", text: "Privacy" }),
+            " разрешите бесплатные эндпоинты, иначе бесплатные модели недоступны."),
+          oKey));
+    const freeWarn = el("div", { class: "banner warn small", text: "Бесплатные тарифы: Google и провайдеры OpenRouter могут использовать запросы для обучения моделей. Приложение отправляет только данные после подтверждённой анонимизации и опубликованные тексты. Лимиты: Gemini — по каждой модели отдельно (у сильнейших ~20 запросов в день), OpenRouter — 50 запросов в день на аккаунт (1000 после разового пополнения на $10)." });
     const geminiOnly = el("div", { class: "form-grid" },
       el("label", { class: "field" }, el("span", { text: "Gemini: анализ и текст" }), reasoning),
       el("label", { class: "field" }, el("span", { text: "Gemini: извлечение и проверка" }), extraction));
     const syncVisibility = () => {
       chainBox.classList.toggle("hidden", !["free", "openrouter"].includes(provider.value));
+      deepseekBox.classList.toggle("hidden", provider.value !== "deepseek");
+      freeKeys.classList.toggle("hidden", !["free", "openrouter", "gemini"].includes(provider.value));
+      freeWarn.classList.toggle("hidden", !["free", "openrouter", "gemini"].includes(provider.value));
       geminiOnly.classList.toggle("hidden", provider.value !== "gemini");
     };
     provider.addEventListener("change", syncVisibility);
@@ -1076,6 +1097,7 @@ async function aiSettingsCard() {
         chain_reasoning: chainR.value, chain_extraction: chainE.value };
       if (gKey.value.trim()) body.gemini_api_key = gKey.value.trim();
       if (oKey.value.trim()) body.openrouter_api_key = oKey.value.trim();
+      if (dKey.value.trim()) body.deepseek_api_key = dKey.value.trim();
       const nv = await rawApi("/admin/llm", { method: "PUT", json: body });
       toast("Настройки ИИ сохранены");
       await loadMeta();
@@ -1095,17 +1117,9 @@ async function aiSettingsCard() {
       ex.length ? el("div", { class: "banner warn small" }, el("strong", { text: "Исчерпан лимит: " }),
         ex.map(([k, e]) => `${k} — до ${new Date(e.until).toLocaleString("ru-RU")}`).join("; ")) : null,
       el("label", { class: "field" }, el("span", { text: "Режим" }), provider),
-      el("div", { class: "form-grid" },
-        el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "Google Gemini" }),
-          el("p", { class: "hint small" }, "Ключ: ", el("a", { href: "https://aistudio.google.com/apikey", target: "_blank", rel: "noopener", text: "AI Studio → Get API key" })),
-          gKey),
-        el("div", { class: "stack", style: "gap:6px" }, el("h3", { text: "OpenRouter" }),
-          el("p", { class: "hint small" }, "Ключ: ", el("a", { href: "https://openrouter.ai/settings/keys", target: "_blank", rel: "noopener", text: "openrouter.ai → Keys" }),
-            ". В ", el("a", { href: "https://openrouter.ai/settings/privacy", target: "_blank", rel: "noopener", text: "Privacy" }),
-            " разрешите бесплатные эндпоинты, иначе бесплатные модели недоступны."),
-          oKey)),
-      geminiOnly, chainBox,
-      el("div", { class: "banner warn small", text: "Бесплатные тарифы: Google и провайдеры OpenRouter могут использовать запросы для обучения моделей. Приложение отправляет только данные после подтверждённой анонимизации и опубликованные тексты. Лимиты: Gemini — по каждой модели отдельно (у сильнейших ~20 запросов в день), OpenRouter — 50 запросов в день на аккаунт (1000 после разового пополнения на $10)." }),
+      deepseekBox,
+      freeKeys,
+      geminiOnly, chainBox, freeWarn,
       el("div", { class: "row" }, save, test), status].filter(Boolean));
     syncVisibility();
   };

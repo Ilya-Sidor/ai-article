@@ -52,6 +52,31 @@ def openrouter_key():
     return settings.get_secret("llm.openrouter_api_key", "OPENROUTER_API_KEY")
 
 
+DEEPSEEK_URL = "https://api.deepseek.com"
+DEEPSEEK_REASONING, DEEPSEEK_EXTRACTION = "deepseek-v4-pro", "deepseek-flash"
+
+
+def deepseek_key_file():
+    from .config import DATA_DIR
+    return DATA_DIR / "deepseek_api_key.txt"
+
+
+def deepseek_key():
+    """Key from the settings, the environment, or a file in the data folder — the file lets the administrator put
+    the key there from a terminal, without pasting it into a browser or a chat."""
+    from . import settings
+    key = settings.get_secret("llm.deepseek_api_key", "DEEPSEEK_API_KEY")
+    if not key and deepseek_key_file().exists():
+        key = deepseek_key_file().read_text(encoding="utf-8").strip()
+    return key or None
+
+
+def deepseek_models():
+    from . import settings
+    return (settings.get("llm.deepseek_model_reasoning", "AI_ARTICLE_DEEPSEEK_MODEL_REASONING", DEEPSEEK_REASONING),
+            settings.get("llm.deepseek_model_extraction", "AI_ARTICLE_DEEPSEEK_MODEL_EXTRACTION", DEEPSEEK_EXTRACTION))
+
+
 # Default free chains ("provider:model"), strongest first. The order is a judgement call and is
 # editable by the administrator; extraction starts lower to save the strongest models' quota.
 DEFAULT_CHAIN_REASONING = [
@@ -81,6 +106,12 @@ def _chain_for(model):
     p = provider()
     if p == "gemini":
         return ["gemini:" + m for m in _gemini_chain(model)]
+    if p == "deepseek":  # the strong model writes, the fast one extracts; each backs the other up
+        if not deepseek_key():
+            return []
+        r, e = deepseek_models()
+        order = [r, e] if model == MODEL_REASONING else [e, r]
+        return ["deepseek:" + m for m in dict.fromkeys(order)]
     reasoning, extraction = chains()
     entries = reasoning if model == MODEL_REASONING else extraction
     if p == "openrouter":
@@ -104,9 +135,12 @@ def effective_model(model):
     if p == "gemini":
         reasoning, extraction = gemini_models()
         return reasoning if model == MODEL_REASONING else extraction
-    if p in ("free", "openrouter"):
+    if p in ("free", "openrouter", "deepseek"):
         entries = [e for e in _chain_for(model) if e not in exhausted_models()] or _chain_for(model)
-        return entries[0].split(":", 1)[1] if entries else model
+        if entries:
+            return entries[0].split(":", 1)[1]
+        if p == "deepseek":
+            return deepseek_models()[0 if model == MODEL_REASONING else 1]
     return model
 
 
@@ -141,6 +175,14 @@ def client():
 
 
 def status():
+    if provider() == "deepseek":
+        r, e = deepseek_models()
+        base = {"provider": "deepseek", "reasoning_model": r, "extraction_model": e, "local": False}
+        if not deepseek_key():
+            return {**base, "available": False,
+                    "reason": "не задан ключ DeepSeek API — сохраните его в файл ~/ai-article-data/deepseek_api_key.txt "
+                              "или в «Аккаунт → ИИ-модели»"}
+        return {**base, "available": True, "exhausted": exhausted_models()}
     if provider() in ("free", "openrouter"):
         r, e = effective_model(MODEL_REASONING), effective_model(MODEL_EXTRACTION)
         base = {"provider": provider(), "reasoning_model": r, "extraction_model": e, "local": False,
@@ -510,6 +552,53 @@ def _openrouter_once(entry, model_id, system, user, schema, max_tokens, reasonin
     raise _Skip("rate", "OpenRouter: лимит запросов в минуту")
 
 
+def _deepseek_once(entry, model_id, system, user, schema, max_tokens, reasoning):
+    """DeepSeek chat completions (OpenAI-compatible): JSON Output mode, thinking on for writing tasks."""
+    import time
+    body = {"model": model_id, "max_tokens": min(max_tokens, 64000), "response_format": {"type": "json_object"},
+            # JSON Output needs the word "json" and the expected shape in the prompt
+            "messages": [{"role": "system", "content": _json_prompt(system, schema)},
+                         {"role": "user", "content": user}],
+            "thinking": {"type": "enabled" if reasoning else "disabled"}}
+    if reasoning:
+        body["reasoning_effort"] = "high"
+    headers = {"Authorization": f"Bearer {deepseek_key()}"}
+    for attempt in range(4):
+        try:
+            r = _or_post(f"{DEEPSEEK_URL}/chat/completions", body, headers, timeout=900)
+        except httpx.HTTPError as exc:
+            raise _Skip("connection", "нет соединения с DeepSeek") from exc
+        text = r.text[:400]
+        if r.status_code == 401:
+            raise _Skip("auth", "DeepSeek отклонил ключ")
+        if r.status_code == 402:
+            _block("deepseek:" + model_id, "на балансе DeepSeek закончились средства — пополните на "
+                                           "platform.deepseek.com", minutes=10)
+            raise _Skip("balance", "на балансе DeepSeek закончились средства")
+        if r.status_code == 400 and "response_format" in body and attempt == 0 and re.search(r"json|format", text, re.I):
+            body.pop("response_format")  # a model/mode without JSON Output: the prompt still asks for JSON
+            continue
+        if r.status_code in (429, 500, 502, 503) and attempt < 3:  # rate limit or "server busy"
+            time.sleep(5 * (attempt + 1))
+            continue
+        if r.status_code != 200:
+            raise _Skip("status", f"DeepSeek {r.status_code}: {text}")
+        try:
+            content = r.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise _Skip("invalid", "DeepSeek вернул некорректный ответ") from exc
+        if not (content or "").strip() and attempt < 3:  # JSON Output may occasionally return empty content
+            continue
+        try:
+            return _parse_json(content)
+        except ValueError as exc:
+            raise _Skip("invalid", "DeepSeek вернул некорректный JSON") from exc
+    raise _Skip("rate", "DeepSeek перегружен — повторите через минуту")
+
+
+_ONCE = {"gemini": "_gemini_once", "openrouter": "_openrouter_once", "deepseek": "_deepseek_once"}
+
+
 def _chain_call(project, purpose, model, system, user, schema, max_tokens, gate=True):
     """Walk the chain: the first model that can answer does; the answering model is logged."""
     if gate:
@@ -523,7 +612,7 @@ def _chain_call(project, purpose, model, system, user, schema, max_tokens, gate=
         prov, model_id = entry.split(":", 1)
         if _is_blocked(entry) or prov in down:
             continue
-        once = _gemini_once if prov == "gemini" else _openrouter_once
+        once = globals()[_ONCE[prov]]
         try:
             out = once(entry, model_id, system, user, schema, max_tokens, model == MODEL_REASONING)
         except _Skip as sk:
@@ -540,6 +629,8 @@ def _chain_call(project, purpose, model, system, user, schema, max_tokens, gate=
         _local.model = model_id
         return out
     kinds = {k for _, k, _ in reasons}
+    if "balance" in kinds:
+        raise LLMUnavailable("на балансе DeepSeek закончились средства — пополните его на platform.deepseek.com")
     if kinds & {"auth"} and not kinds - {"auth"}:
         raise LLMUnavailable("ключ API отклонён — проверьте его в «Аккаунт → ИИ-модели»")
     if kinds and kinds <= {"connection"}:
@@ -557,7 +648,7 @@ def _gemini_call(project, purpose, model, system, user, schema, max_tokens, gate
 
 def _call(project, purpose, model, system, user, schema, max_tokens, gate=True, **extra):
     _local.model = None
-    if provider() in ("gemini", "free", "openrouter"):
+    if provider() in ("gemini", "free", "openrouter", "deepseek"):
         return _chain_call(project, purpose, model, system, user, schema, max_tokens, gate)
     if provider() == "ollama":
         out = _ollama_call(project, purpose, model, system, user, schema, max_tokens, gate)

@@ -9,7 +9,8 @@ from sqlalchemy import func, select
 from . import auth, db, llm, settings
 
 router = APIRouter(prefix="/api/admin")
-PROVIDERS = {"free": "Бесплатная цепочка: Gemini + OpenRouter", "gemini": "Только Google Gemini API",
+PROVIDERS = {"deepseek": "DeepSeek API (платно, недорого)",
+             "free": "Бесплатная цепочка: Gemini + OpenRouter", "gemini": "Только Google Gemini API",
              "openrouter": "Только OpenRouter (бесплатные модели)", "anthropic": "Anthropic Claude API (платно)",
              "ollama": "Локальная модель (Ollama)"}
 
@@ -41,6 +42,9 @@ def _view():
                        "free_models": _free_openrouter_models()},
         "chains": {"reasoning": chain_r, "extraction": chain_e,
                    "default_reasoning": llm.DEFAULT_CHAIN_REASONING, "default_extraction": llm.DEFAULT_CHAIN_EXTRACTION},
+        "deepseek": {"configured": bool(llm.deepseek_key()), "key_hint": _hint(llm.deepseek_key()),
+                     "key_file": str(llm.deepseek_key_file()), "key_in_file": llm.deepseek_key_file().exists(),
+                     "models": dict(zip(("reasoning", "extraction"), llm.deepseek_models()))},
         "exhausted": llm.exhausted_models(),
     }
 
@@ -55,6 +59,7 @@ class LLMIn(BaseModel):
     provider: Optional[str] = None
     gemini_api_key: Optional[str] = Field(default=None, max_length=300)
     openrouter_api_key: Optional[str] = Field(default=None, max_length=300)
+    deepseek_api_key: Optional[str] = Field(default=None, max_length=300)
     chain_reasoning: Optional[str] = Field(default=None, max_length=5000)
     chain_extraction: Optional[str] = Field(default=None, max_length=5000)
     gemini_model_reasoning: Optional[str] = Field(default=None, max_length=100)
@@ -72,6 +77,8 @@ def put_llm(body: LLMIn, request: Request):
         settings.set("llm.gemini_api_key", body.gemini_api_key.strip(), secret=True)
     if body.openrouter_api_key is not None:
         settings.set("llm.openrouter_api_key", body.openrouter_api_key.strip(), secret=True)
+    if body.deepseek_api_key is not None:
+        settings.set("llm.deepseek_api_key", body.deepseek_api_key.strip(), secret=True)
     for field, key in (("chain_reasoning", "llm.chain_reasoning"), ("chain_extraction", "llm.chain_extraction")):
         v = getattr(body, field)
         if v is not None:
@@ -80,7 +87,7 @@ def put_llm(body: LLMIn, request: Request):
             if bad:
                 raise HTTPException(400, "каждая строка — «gemini:модель» или «openrouter:модель»; ошибка: " + bad[0])
             settings.set(key, "\n".join(lines))
-    if body.gemini_api_key or body.openrouter_api_key:  # a new key may lift "key rejected" blocks
+    if body.gemini_api_key or body.openrouter_api_key or body.deepseek_api_key:  # a new key lifts "rejected" blocks
         llm._exhausted.clear()
     for field, key in (("gemini_model_reasoning", "llm.gemini_model_reasoning"),
                        ("gemini_model_extraction", "llm.gemini_model_extraction")):

@@ -277,3 +277,7 @@ details pre {
 .fact { background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 2px; cursor: help; }
 .cite { color: var(--accent); font-weight: 600; cursor: help; }
 .cite.bad, .todo { background: var(--danger-soft); color: var(--danger); border-radius: 3px; padding: 0 2px; }
+
+.issue-row { border-bottom: 1px solid var(--border); padding: 8px 0; display: flex; flex-direction: column; gap: 4px; }
+.issue-row:last-child { border-bottom: none; }
+.issue-fragment { background: var(--neutral-soft); border-radius: 6px; padding: 4px 8px; white-space: pre-wrap; }

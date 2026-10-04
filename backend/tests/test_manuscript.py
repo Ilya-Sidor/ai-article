@@ -385,3 +385,39 @@ def test_english_figures_have_no_cyrillic(api, project, claude, monkeypatch):
     m = api.get(f"/api/projects/{pid}/manuscript").json()
     assert m["terms"]["Пол"]["en"] == "EN Pol" and not any(i["code"] == "untranslated" for i in m["issues"])
     assert drawn and not [d for d in drawn if cyr.search(d)] and any("EN " in d for d in drawn)
+
+
+def test_issues_say_where_and_offer_fixes(api, project, claude):
+    """Blocking issues carry a place and one-click fixes; [уточнить: …] can be filled from the list."""
+    pid, kit, expl = project
+    api.post(f"/api/projects/{pid}/manuscript/terms/auto")
+    api.post(f"/api/projects/{pid}/manuscript/plan")
+    m = api.post(f"/api/projects/{pid}/manuscript/plan/approve").json()
+    K = {s["kind"]: s["key"] for s in m["sections"]}
+    claude.sections = {"introduction": "GIST is common.",
+                       "methods": "CD117 clone [уточнить: клон CD117] was used. {{Z9.p}}",
+                       "results": "The series comprised {{n}} cases.",
+                       "discussion": "Mutual exclusivity was observed."}
+    for kind in ("introduction", "methods", "results", "discussion"):
+        api.post(f"/api/projects/{pid}/manuscript/sections/{K[kind]}/generate")
+        api.post(f"/api/projects/{pid}/manuscript/sections/{K[kind]}/accept")
+    st = api.get(f"/api/projects/{pid}/manuscript/export/status").json()
+    by = {(b["code"], b.get("section")): b for b in st["blocking"]}
+    todo = by[("todo", K["methods"])]
+    assert todo["fix"]["where"].startswith("Раздел «") and todo["fix"]["goto"]["section"] == K["methods"]
+    fill = next(a for a in todo["fix"]["actions"] if a["type"] == "fill")
+    assert fill["find"] == "[уточнить: клон CD117]"
+    lim = by[("limitations", K["discussion"])]["fix"]["actions"][0]
+    assert lim["type"] == "revise" and "ограничени" in lim["instruction"]
+    assert by[("unknown_ref", K["methods"])]["fix"]["actions"][0]["type"] == "remove"
+    assert by[("no_journal", None)]["fix"]["goto"] == {"step": "project"}
+
+    r = api.post(f"/api/projects/{pid}/manuscript/sections/{K['methods']}/replace",
+                 json={"find": fill["find"], "replace": "YR145"})
+    m = r.json()
+    assert "clone YR145 was used" in _sec(m, "methods")["source"]
+    api.post(f"/api/projects/{pid}/manuscript/sections/{K['methods']}/replace", json={"find": "{{Z9.p}}", "replace": ""})
+    st = api.get(f"/api/projects/{pid}/manuscript/export/status").json()
+    assert not [b for b in st["blocking"] if b.get("section") == K["methods"] and b["code"] in ("todo", "unknown_ref")]
+    again = api.post(f"/api/projects/{pid}/manuscript/sections/{K['methods']}/replace", json={"find": fill["find"]})
+    assert again.status_code == 400  # already fixed
