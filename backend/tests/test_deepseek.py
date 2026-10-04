@@ -80,3 +80,9 @@ def test_ai_statement_names_deepseek(api, ds):
     llm._log("pD", "write_section:results", "deepseek-v4-pro", "x")
     text = statements.ai_statement("pD")
     assert "DeepSeek; deepseek-v4-pro" in text and "Ollama" not in text
+
+
+def test_key_pasted_twice_is_used_once(api, ds, data_dir):
+    from app import llm
+    (data_dir / "deepseek_api_key.txt").write_text("sk-abc123sk-abc123\n")
+    assert llm.deepseek_key() == "sk-abc123"

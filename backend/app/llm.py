@@ -67,7 +67,11 @@ def deepseek_key():
     from . import settings
     key = settings.get_secret("llm.deepseek_api_key", "DEEPSEEK_API_KEY")
     if not key and deepseek_key_file().exists():
-        key = deepseek_key_file().read_text(encoding="utf-8").strip()
+        key = deepseek_key_file().read_text(encoding="utf-8")
+    key = "".join((key or "").split())
+    half = len(key) // 2
+    if key.count("sk-") == 2 and key[:half] == key[half:]:  # pasted twice into a hidden prompt
+        key = key[:half]
     return key or None
 
 
