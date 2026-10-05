@@ -48,8 +48,11 @@ def _finding(analysis, key):
     return next((f for f in analysis.get("findings", []) if f["key"] == key), None)
 
 
-def default_caption(item, analysis, terms, kind, lang="en"):
+def default_caption(item, analysis, terms, kind, lang="en", state=None):
     ru = lang == "ru"
+    if item["kind"] == "micro":
+        from .micro import caption
+        return caption(state or {}, item, lang, english=False)
     if item["kind"] == "table1":
         return "Клинико-морфологическая характеристика серии" if ru else "Clinicopathological characteristics of the series"
     if item["kind"] == "case_data":
@@ -156,7 +159,12 @@ def table_data(item, analysis, terms, lang="en"):
     return {"caption": caption, "caption_en": caption_en, "columns": cols, "rows": rows, "footnote": foot}
 
 
-def figure_data(item, analysis, terms, lang="en"):
+def figure_data(item, analysis, terms, lang="en", state=None):
+    if item["kind"] == "micro":  # a figure of micrographs: the legend comes from its panels
+        from .micro import caption
+        return {"id": item["id"], "kind": "micro", "finding": None, "item": item,
+                "caption": item.get("caption") or caption(state or {}, item, lang),
+                "caption_en": item.get("caption_en") or caption(state or {}, item, lang, english=True)}
     f = _finding(analysis, item.get("key")) if item["kind"] == "finding" else None
     return {"id": item["id"], "kind": item["kind"], "finding": f,
             "caption": item.get("caption") or default_caption(item, analysis, terms, "figure", lang),

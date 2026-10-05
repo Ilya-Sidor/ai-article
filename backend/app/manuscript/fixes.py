@@ -86,6 +86,8 @@ def annotate(issue, sections):
                                            "Используй только данные случая; чего нет в данных — [уточнить: …]."})
     elif code.startswith("titlepage_"):
         where, goto = "Данные автора → авторы и учреждения", {"step": "draft", "tab": "inputs"}
+    elif code.startswith("micro_"):
+        where, goto = "Таблицы и рисунки → микрофотографии", {"step": "draft", "tab": "assets"}
     elif code == "no_journal":
         where, goto = "Проект → целевой журнал", {"step": "project"}
     elif code.startswith("journal_"):

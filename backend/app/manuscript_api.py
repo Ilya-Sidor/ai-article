@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from . import llm
 from .analysis import engine, figures as figs
@@ -15,7 +16,7 @@ from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
 from .manuscript import agent, assets, case as mcase, checks as mchecks, export, facts as mfacts, lang as mlang
-from .manuscript import fixes, review as mreview, revision as mrevision, statements, titlepage
+from .manuscript import fixes, micro, review as mreview, revision as mrevision, statements, titlepage
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -89,7 +90,7 @@ def context(pid, state=None):
                "caption": t.get("caption") or assets.default_caption(t, analysis, state["terms"], "table", lang)}
               for t in state["tables"]]
     figures_ = [{"placeholder": f"{{{{FIG:{f['id']}}}}}", "include": f["include"],
-                 "caption": f.get("caption") or assets.default_caption(f, analysis, state["terms"], "figure", lang)}
+                 "caption": f.get("caption") or assets.default_caption(f, analysis, state["terms"], "figure", lang, state)}
                 for f in state["figures"]]
     ctx = {
         "project": project, "analysis": analysis, "facts": built["facts"], "findings": findings,
@@ -173,6 +174,7 @@ def _check(pid, ctx, state, renderer):
                        "message": "нет английского перевода: " + "; ".join(what), "fragment": "",
                        "suggestion": "«1. Терминология» → «Перевести автоматически» или впишите перевод"})
     issues += titlepage.issues(state.get("inputs"), ctx["lang"])
+    issues += micro.issues(state, ctx["template"])
     # the abstract must not contain data that the body does not report
     body = " ".join(s["source"] for s in sections if s["kind"] in ("results", "case_presentation", "methods", "other"))
     ab = next((s for s in sections if s["kind"] == "abstract" and s["source"].strip()), None)
@@ -293,7 +295,8 @@ def _view(pid, ctx, state):
     if ctx["lang"] == "ru":  # English captions of a bilingual journal
         for items, kind in ((tables, "table"), (figures_, "figure")):
             for it in items:
-                it["caption_en_effective"] = assets.default_caption(it, ctx["analysis"], state["terms"], kind, "en")
+                it["caption_en_effective"] = (micro.caption(state, it, "ru", english=True) if it.get("kind") == "micro"
+                                              else assets.default_caption(it, ctx["analysis"], state["terms"], kind, "en"))
     return {
         "plan": state.get("plan"), "inputs": state.get("inputs"), "terms": state["terms"],
         "terms_needed": mfacts.terms_needed(store, pid), "front": state.get("front") or {},
@@ -306,7 +309,7 @@ def _view(pid, ctx, state):
         "template": ctx["template"], "has_analysis": bool(ctx["analysis"]),
         "n_accepted_findings": len(ctx["findings"]), "case_report": ctx["case_report"],
         **_remarks_view(state, renderer),
-        "revision": _revision_view(state),
+        "revision": _revision_view(state), "images": state.get("images") or [],
         "n_cases": (ctx["analysis"].get("summary") or {}).get("n") if ctx["case_report"] else None,
     }
 
@@ -611,6 +614,107 @@ def set_remark(pid: str, rid: str, body: RemarkIn):
     if item is None:
         raise HTTPException(404, "замечание не найдено")
     item["status"] = body.status
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+# ---------------------------------------------------------------------------
+# Micrographs: images and multi-panel figures
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{pid}/manuscript/images")
+async def upload_images(pid: str, request: Request, files: List[UploadFile] = File(default=[]), refs: str = Form("")):
+    from . import chunks
+    state = ms.load(store, pid)
+    added, errors = [], []
+    for name, content in await chunks.collect(request, files, refs, 45 * 1024 * 1024):
+        try:
+            added.append(await run_in_threadpool(micro.add, store, pid, state, name, content))
+        except micro.ImageError as exc:
+            errors.append({"file": name, "error": str(exc)})
+    ms.save(store, pid, state)
+    store.audit(pid, "author", "manuscript.images_added", {"n": len(added)})
+    return {"added": added, "errors": errors}
+
+
+@router.get("/projects/{pid}/manuscript/images/{iid}.jpg")
+def image_thumb(pid: str, iid: str, size: int = 480):
+    state = ms.load(store, pid)
+    if not any(i["id"] == iid for i in state.get("images") or []):
+        raise HTTPException(404, "изображение не найдено")
+    return Response(micro.thumbnail(store, pid, iid, max(64, min(size, 1600))), media_type="image/jpeg")
+
+
+class ImageIn(BaseModel):
+    description: Optional[str] = Field(default=None, max_length=1000)
+    description_en: Optional[str] = Field(default=None, max_length=1000)
+    stain: Optional[str] = Field(default=None, max_length=200)
+    magnification: Optional[str] = Field(default=None, max_length=100)
+    um_per_px: Optional[float] = Field(default=None, ge=0, le=1000)
+    has_scale_bar: Optional[bool] = None
+    phi_checked: Optional[bool] = None
+
+
+@router.put("/projects/{pid}/manuscript/images/{iid}")
+def update_image(pid: str, iid: str, body: ImageIn):
+    state = ms.load(store, pid)
+    im = next((i for i in state.get("images") or [] if i["id"] == iid), None)
+    if im is None:
+        raise HTTPException(404, "изображение не найдено")
+    for k, v in body.model_dump(exclude_unset=True).items():
+        im[k] = v.strip() if isinstance(v, str) else (v or None) if k == "um_per_px" else v
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+@router.delete("/projects/{pid}/manuscript/images/{iid}")
+def delete_image(pid: str, iid: str):
+    state = ms.load(store, pid)
+    state["images"] = [i for i in state.get("images") or [] if i["id"] != iid]
+    for f in state["figures"]:
+        if f.get("kind") == "micro":
+            f["panels"] = [p for p in f.get("panels") or [] if p != iid]
+    path = micro._dir(store, pid) / f"{iid}.png"
+    if path.exists():
+        path.unlink()
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+class MicroFigureIn(BaseModel):
+    panels: List[str] = Field(min_length=1, max_length=12)
+    columns: int = Field(default=2, ge=1, le=4)
+    title: str = Field(default="", max_length=500)
+    title_en: str = Field(default="", max_length=500)
+
+
+@router.post("/projects/{pid}/manuscript/figures/micro")
+def add_micro_figure(pid: str, body: MicroFigureIn):
+    state = ms.load(store, pid)
+    known = {i["id"] for i in state.get("images") or []}
+    if not set(body.panels) <= known:
+        raise HTTPException(400, "неизвестное изображение")
+    n = max([int(f["id"][2:]) for f in state["figures"] if f["id"].startswith("fm")] + [0]) + 1
+    state["figures"].append({"id": f"fm{n}", "kind": "micro", "include": True, "caption": None, **body.model_dump()})
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+@router.put("/projects/{pid}/manuscript/figures/micro/{fid}")
+def update_micro_figure(pid: str, fid: str, body: MicroFigureIn):
+    state = ms.load(store, pid)
+    f = next((x for x in state["figures"] if x["id"] == fid and x.get("kind") == "micro"), None)
+    if f is None:
+        raise HTTPException(404, "рисунок не найден")
+    f.update(body.model_dump())
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+@router.delete("/projects/{pid}/manuscript/figures/micro/{fid}")
+def delete_micro_figure(pid: str, fid: str):
+    state = ms.load(store, pid)
+    state["figures"] = [x for x in state["figures"] if not (x["id"] == fid and x.get("kind") == "micro")]
     ms.save(store, pid, state)
     return get_manuscript(pid)
 
@@ -965,6 +1069,12 @@ def figure_preview(pid: str, fid: str):
     item = next((f for f in state["figures"] if f["id"] == fid), None)
     if item is None:
         raise HTTPException(404, "рисунок не найден")
+    if item["kind"] == "micro":
+        try:
+            return Response(micro.compose(store, pid, state, item, 150, "png", _figure_language(ctx, state)),
+                            media_type="image/png")
+        except micro.ImageError as exc:
+            raise HTTPException(400, str(exc))
     run_dir = engine.run_dir_latest(store, pid)
     spec = read_json(run_dir / "spec.json")
     # rendered as in the export (language and terminology can change at any time, so no cache)
@@ -1021,7 +1131,7 @@ def export_status(pid):
                                      "fragment": ", ".join(sorted(set(re.findall(r"[А-Яа-яЁё][А-Яа-яЁё ,%-]*", blob)))[:4]),
                                      "suggestion": "заполните английские термины на шаге «Терминология»"})
         for f in state["figures"]:
-            fd = assets.figure_data(f, analysis, state["terms"], ctx["lang"])
+            fd = assets.figure_data(f, analysis, state["terms"], ctx["lang"], state)
             if f["include"] and re.search(r"[А-Яа-яЁё]", fd["caption_en"] if ru else fd["caption"]):
                 blocking.append({"section": None, "heading": "Рисунки", "severity": "blocking", "code": "cyrillic_figure",
                                  "message": f"в подписи рисунка {f['id']} есть кириллица", "fragment": "", "suggestion": ""})
@@ -1060,7 +1170,7 @@ def do_export(pid: str, mode: str = "draft"):
         raise HTTPException(400, "нет данных случая" if ctx["case_report"] else "нет результатов анализа")
     lang = ctx["lang"]
     tables = [assets.table_data(t, analysis, state["terms"], lang) for t in state["tables"] if t["include"]]
-    figures_ = [assets.figure_data(f, analysis, state["terms"], lang) for f in state["figures"] if f["include"]]
+    figures_ = [assets.figure_data(f, analysis, state["terms"], lang, state) for f in state["figures"] if f["include"]]
     tpl = ctx["template"] or {}
     formats = [x.lower() for x in (tpl.get("figures", {}).get("formats") or [])]
     fmt = "tif" if any("tif" in x for x in formats) else "png"
@@ -1069,6 +1179,7 @@ def do_export(pid: str, mode: str = "draft"):
     ectx = {"renderer": renderer, "front": state.get("front") or {}, "sections": sections, "tables": tables,
             "figures": figures_, "counts": st["counts"], "authors": (state.get("inputs") or {}).get("authors"),
             "inputs": state.get("inputs") or {},
+            "micro_render": lambda item, flang: micro.compose(store, pid, state, item, int(dpi), fmt, flang),
             "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"], "lang": lang,
             "figure_language": _figure_language(ctx, state)}
     if ctx["case_report"]:

@@ -218,7 +218,7 @@ def package(ctx, draft, issues, run_dir, spec, results, extra_files):
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("manuscript.docx", build_docx(ctx, draft, issues))
         z.writestr("manuscript.md", markdown(ctx))
-        tmp = run_dir / "export_figures" if ctx["figures"] else None
+        tmp = run_dir / "export_figures" if run_dir and any(f["kind"] != "micro" for f in ctx["figures"]) else None
         if tmp:
             tmp.mkdir(exist_ok=True)
         ru = ctx.get("lang") == "ru"
@@ -229,6 +229,9 @@ def package(ctx, draft, issues, run_dir, spec, results, extra_files):
         for i, f in enumerate(ctx["figures"], 1):
             for flang, suffix in versions:
                 name = f"Рис-{i}{suffix}.{fmt}" if ru else f"Figure_{i}.{fmt}"
+                if f["kind"] == "micro":  # photographs: composed from the panels, letters/scale bar in this language
+                    z.writestr(f"figures/{name}", ctx["micro_render"](f["item"], flang))
+                    continue
                 out = tmp / f"fig_{i}{suffix}.{fmt}"
                 if f["kind"] == "finding":
                     path = figs.render_finding(run_dir, f["finding"], spec, out_path=out, dpi=ctx["dpi"],

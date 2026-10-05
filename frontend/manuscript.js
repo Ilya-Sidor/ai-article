@@ -440,6 +440,66 @@ function msPlan(p, m, reload) {
 
 /* ---------- 4. tables and figures ---------- */
 
+/* micrographs (backend/app/manuscript/micro.py) */
+function microCard(p, m, reload) {
+  const images = m.images || [];
+  const ruJ = m.lang === "ru";
+  const fileIn = el("input", { type: "file", multiple: true, accept: ".jpg,.jpeg,.png,.tif,.tiff", class: "hidden" });
+  const status = el("span", { class: "small muted" });
+  const upload = async (files) => {
+    if (!files.length) return;
+    status.textContent = "Загрузка…";
+    try {
+      const r = await sendFiles(`/projects/${p.id}/manuscript/images`, [...files], { onProgress: (n, i, t) => { status.textContent = `Передача «${n}»: ${Math.round(100 * i / t)}%`; } });
+      if (r.errors.length) toast(r.errors.map((e) => `${e.file}: ${e.error}`).join("; "), "error");
+      reload(await api(`/projects/${p.id}/manuscript`));
+    } catch (e) { toast(e.message, "error"); status.textContent = ""; }
+  };
+  fileIn.addEventListener("change", () => upload(fileIn.files));
+  const drop = el("div", { class: "dropzone", style: "padding:14px", onclick: () => fileIn.click(),
+    ondragover: (e) => { e.preventDefault(); drop.classList.add("drag"); }, ondragleave: () => drop.classList.remove("drag"),
+    ondrop: (e) => { e.preventDefault(); drop.classList.remove("drag"); upload(e.dataTransfer.files); } },
+    el("strong", { text: "Микрофотографии (JPEG, PNG, TIFF)" }),
+    el("div", { class: "hint small", text: "перетащите или нажмите; метаданные снимков (камера, программа, даты, GPS) удаляются при загрузке" }), status);
+  const selected = new Set();
+  const save = async (im, patch) => reload(await api(`/projects/${p.id}/manuscript/images/${im.id}`, { method: "PUT", json: patch }));
+  const field = (im, key, ph, w) => {
+    const i = el("input", { value: im[key] ?? "", placeholder: ph, style: w ? `width:${w}` : "" });
+    i.addEventListener("change", () => save(im, { [key]: key === "um_per_px" ? (parseFloat(i.value.replace(",", ".")) || null) : i.value }));
+    return i;
+  };
+  const check = (im, key, label) => el("label", { class: "row small", style: "gap:4px" },
+    el("input", { type: "checkbox", checked: !!im[key], onchange: (e) => save(im, { [key]: e.target.checked }) }), label);
+  const cards = images.map((im) => el("div", { class: "card stack", style: "gap:6px;padding:10px;width:280px" },
+    el("div", { class: "row", style: "gap:6px;align-items:flex-start;flex-wrap:nowrap" },
+      el("input", { type: "checkbox", title: "в рисунок", onchange: (e) => { e.target.checked ? selected.add(im.id) : selected.delete(im.id); } }),
+      el("img", { src: `/api/projects/${p.id}/manuscript/images/${im.id}.jpg?size=480`, alt: im.name, style: "width:230px;border-radius:6px" })),
+    el("div", { class: "small mono", text: `${im.id} · ${im.width}×${im.height}` }),
+    field(im, "description", ruJ ? "что видно (рус.)" : "what it shows"), ruJ ? field(im, "description_en", "what it shows (English)") : null,
+    el("div", { class: "row", style: "gap:4px;flex-wrap:nowrap" }, field(im, "stain", "окраска: H&E, CD117…", "60%"), field(im, "magnification", "×200", "38%")),
+    el("div", { class: "row", style: "gap:4px;flex-wrap:nowrap" }, field(im, "um_per_px", "мкм/пиксель", "50%"), el("span", { class: "hint small", text: "→ отрезок нарисуется" })),
+    check(im, "has_scale_bar", "масштабный отрезок уже есть на снимке"),
+    check(im, "phi_checked", "надписей с данными пациента нет (этикетка, подписи)"),
+    el("button", { class: "small ghost", text: "Удалить", onclick: async () => { if (confirm("Удалить изображение?")) reload(await api(`/projects/${p.id}/manuscript/images/${im.id}`, { method: "DELETE" })); } })));
+  const cols = el("select", {}, [1, 2, 3].map((n) => el("option", { value: n, text: `${n} в ряд`, selected: n === 2 })));
+  const make = el("button", { class: "primary small", text: "Собрать рисунок из отмеченных", disabled: !images.length });
+  make.addEventListener("click", () => busy(make, async () => {
+    if (!selected.size) { toast("Отметьте изображения галочками"); return; }
+    const order = images.map((i) => i.id).filter((id) => selected.has(id));
+    reload(await api(`/projects/${p.id}/manuscript/figures/micro`, { json: { panels: order, columns: Number(cols.value) } }));
+  }));
+  const micros = m.figures.filter((f) => f.kind === "micro");
+  const figRows = micros.map((f) => el("div", { class: "row", style: "border-bottom:1px solid var(--border);padding:6px 0;align-items:flex-start;flex-wrap:nowrap" },
+    el("img", { src: `/api/projects/${p.id}/manuscript/figures/${f.id}.png?v=${Date.now()}`, style: "width:200px;border:1px solid var(--border)" }),
+    el("div", { class: "grow small" }, el("div", { class: "mono", text: `{{FIG:${f.id}}} · панели: ${f.panels.join(", ")}` }), el("div", { text: f.caption_effective })),
+    el("button", { class: "small ghost", text: "Удалить", onclick: async () => reload(await api(`/projects/${p.id}/manuscript/figures/micro/${f.id}`, { method: "DELETE" })) })));
+  return el("div", { class: "card stack" }, el("h3", { text: "Микрофотографии" }),
+    el("p", { class: "hint small", text: "Загрузите снимки, опишите каждый (что видно, окраска, увеличение), отметьте нужные и соберите рисунок: панели A, B, C… с буквами, масштабным отрезком (если указан размер пикселя) и подписью из ваших описаний. Рисунок экспортируется в формате и разрешении журнала; в тексте на него ссылаются как {{FIG:…}}." }),
+    drop, images.length ? el("div", { class: "row", style: "gap:10px;align-items:flex-start" }, cards) : null,
+    images.length ? el("div", { class: "row" }, cols, make) : null,
+    micros.length ? el("div", {}, el("h4", { text: "Рисунки из микрофотографий" }), figRows) : null);
+}
+
 function msAssets(p, m, reload) {
   const tables = m.tables.map((t) => ({ ...t }));
   const figures = m.figures.map((f) => ({ ...f }));
@@ -458,7 +518,7 @@ function msAssets(p, m, reload) {
   const tbl = (items, kind) => el("div", { class: "table-wrap" }, el("table", {},
     el("thead", {}, el("tr", {}, ["В статье", "Ссылка в тексте", "Тип", m.lang === "ru" ? "Подпись RU / EN (пусто — по умолчанию)" : "Подпись (пусто — по умолчанию)", ""].map((h) => el("th", { text: h })))),
     el("tbody", {}, items.map((it) => row(it, kind)))));
-  return el("div", { class: "stack" },
+  return el("div", { class: "stack" }, microCard(p, m, reload),
     el("div", { class: "card stack" }, el("h3", { text: "Таблицы (FR-5.6)" }),
       el("p", { class: "hint small", text: "Значения ячеек берутся из результатов анализа. Нумерация — по порядку включённых; в тексте используются ссылки {{TAB:…}}." }), tbl(tables, "TAB")),
     el("div", { class: "card stack" }, el("h3", { text: "Рисунки (FR-5.7)" }),

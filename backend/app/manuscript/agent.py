@@ -105,7 +105,8 @@ CASE_PRESENTATION = (
     "differential diagnosis and how it was excluded, diagnostic challenges, prognostic characteristics such as the "
     "risk group); Therapeutic intervention (type, timing, changes); Follow-up and outcomes (length of follow-up, "
     "outcome, adherence, adverse events). Use only the facts of the case (placeholders) and the case documents; never "
-    "add a finding that is not documented — write [уточнить: …] instead. Refer to the case table as {{TAB:t1}}.")
+    "add a finding that is not documented — write [уточнить: …] instead. Refer to the case table as {{TAB:t1}} and "
+    "to the micrographs by their placeholders ({{FIG:<id>}}, panels as 'Fig. X A'), describing what each shows.")
 CASE_INSTRUCTIONS = {
     "introduction": "Introduction of a case report (CARE 4): briefly why this case is unique or instructive — the "
                     "entity, what is known (with citations), the diagnostic pitfall or gap this case illustrates. "
@@ -186,8 +187,8 @@ def _context_block(ctx):
             "journal": ctx.get("journal"), "article_type": "case report (CARE guidelines)",
             "focus": ctx.get("focus"), "key_messages": ctx.get("key_messages"),
             "case_documents_anonymised": ctx.get("case_documents"),
-            "tables": ctx.get("tables"), "accepted_citations": ctx.get("citations"),
-            "author_inputs": ctx.get("inputs"),
+            "tables": ctx.get("tables"), "figures_micrographs": ctx.get("figures"),
+            "accepted_citations": ctx.get("citations"), "author_inputs": ctx.get("inputs"),
         }, ensure_ascii=False, indent=1)
     return json.dumps({
         "journal": ctx.get("journal"), "article_type": ctx.get("article_type"),
