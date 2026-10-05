@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 from .. import config
-from . import lang as L
+from . import lang as L, style
 from .render import LATEX_LEFTOVER, word_count
 
 DEFAULT_CLICHES = Path(__file__).parent / "cliches.json"
@@ -129,10 +129,22 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
                     f"«{m.group(0)}» — слишком сильно для находки уровня exploratory/описательная ({', '.join(weak)})",
                     s, "«наблюдалось в данной серии» / «может указывать» / «требует подтверждения»" if russian
                     else "suggests / was observed in this series / warrants validation")
-        # clichés
+        # signs of AI prose (style.py) and the author's own cliché list
+        st = style.analyze(text, "ru" if russian else "en")
+        counts.setdefault("style", {})[sec["key"]] = st["score"]
+        seen_frag = set()
+        for h in st["hits"]:
+            if h["fragment"].lower() in seen_frag or len(seen_frag) >= 6:
+                continue
+            seen_frag.add(h["fragment"].lower())
+            add(sec, "warning", "ai_style", f"звучит как ИИ: «{h['fragment']}»", h["fragment"], h["advice"])
+        if st["flat_rhythm"]:
+            add(sec, "warning", "ai_rhythm", "предложения почти одинаковой длины — характерно для текста ИИ", "",
+                "чередуйте короткие и длинные предложения")
         for c in all_cl:
             for m in re.finditer(c["pattern"], text, re.I):
-                add(sec, "warning", "cliche", f"клише: «{m.group(0)}»", m.group(0), c["suggestion"])
+                if m.group(0).lower() not in seen_frag:
+                    add(sec, "warning", "cliche", f"клише: «{m.group(0)}»", m.group(0), c["suggestion"])
         starts = len(re.findall(r"(?:^|[.!?]\s+)(Furthermore|Moreover|Additionally),", text))
         if starts > 2:
             add(sec, "warning", "cliche", f"«Furthermore/Moreover/Additionally» в начале предложений: {starts} раз(а)",
@@ -168,6 +180,21 @@ def check(sections, renderer, facts, findings, template, tier_code, inputs_text,
                 if before != "(" and not after.startswith(" ("):
                     add(sec, "warning", "abbreviation", f"аббревиатура {a} не расшифрована при первом упоминании"
                         + (" в abstract" if label == "abstract" else ""), a)
+
+    # the discussion should not open by repeating the introduction's first sentence (a typical model habit)
+    first = {}
+    for s in sections:
+        if s["kind"] in ("introduction", "discussion") and s["source"].strip():
+            body = [p for p in renderer.segments(s["source"], s["kind"]) if p["type"] == "p"]
+            if body:
+                text = "".join(seg["v"] for seg in body[0]["segments"])
+                first[s["kind"]] = (s, re.split(r"(?<=[.!?])\s+", text.strip())[0])
+    if "introduction" in first and "discussion" in first:
+        a, b = (set(re.findall(r"\w{4,}", first[k][1].lower())) for k in ("introduction", "discussion"))
+        if a and b and len(a & b) / len(a | b) >= 0.45:
+            sec = first["discussion"][0]
+            add(sec, "warning", "ai_repeat", "обсуждение начинается с повторения первой фразы введения",
+                first["discussion"][1], "начните обсуждение с главного результата этой работы")
 
     # terminology consistency across the manuscript
     full = " ".join(renderer.text(s["source"], s["kind"]) for s in sections)

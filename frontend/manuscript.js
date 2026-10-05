@@ -70,6 +70,7 @@ function issueRow(p, i, after) {
     citation: (a) => api(`/projects/${p.id}/literature/citations/${a.id}`, { json: { decision: a.decision } }),
     verify: (a) => api(`/projects/${p.id}/literature/citations/${a.id}/verify`, { method: "POST" }),
     remark: (a) => api(`/projects/${p.id}/manuscript/remarks/${a.id}`, { json: { status: a.status } }),
+    humanize: (a) => api(`${base(a)}/humanize`, { method: "POST" }),
     consent: async () => {
       const cur = await api(`/projects/${p.id}/manuscript`);
       const inputs = { ...(cur.inputs || {}) };
@@ -89,8 +90,8 @@ function issueRow(p, i, after) {
       return el("div", { class: "row", style: "flex:1" }, input, btn);
     }
     if (a.type === "goto") return el("button", { class: "small", text: a.label, onclick: () => gotoFix(p, a.goto) });
-    const btn = el("button", { class: "small" + (a.type === "revise" || a.type === "auto_terms" ? " primary" : ""), text: a.label,
-      disabled: ["revise", "auto_terms"].includes(a.type) && !state.meta.llm.available,
+    const btn = el("button", { class: "small" + (["revise", "auto_terms", "humanize"].includes(a.type) ? " primary" : ""), text: a.label,
+      disabled: ["revise", "auto_terms", "humanize"].includes(a.type) && !state.meta.llm.available,
       title: a.instruction || "" });
     btn.addEventListener("click", () => run(btn, () => handlers[a.type](a)));
     return btn;
@@ -414,6 +415,7 @@ function msInputs(p, m, reload) {
       field("Финансирование", "funding", { textarea: true }),
       field("Доступность данных", "data_availability", { textarea: true }),
       field("Благодарности", "acknowledgements", { textarea: true }),
+      field("Образец вашего стиля — абзац из вашей опубликованной статьи (необязательно; ИИ подстроится под регистр и ритм, содержание не копируется)", "style_sample", { textarea: true }),
       el("div", { class: "banner warn small", text: "ИИ не может быть указан автором; авторы несут ответственность за содержание (FR-7.2). Заявление об использовании ИИ формируется автоматически по фактическому журналу обращений к моделям." })),
     el("div", {}, save));
 }
@@ -607,6 +609,14 @@ function sectionEditor(p, m, s, reload) {
   const accept = el("button", { class: s.status === "accepted" ? "active-ok" : "ok", text: s.status === "accepted" ? `✓ Принят (v${s.accepted_version})` : "Принять раздел", disabled: !s.versions.length || s.status === "accepted" });
   accept.addEventListener("click", () => busy(accept, () => post("/accept")));
   const reopen = s.status === "accepted" ? el("button", { class: "small ghost", text: "вернуть в работу", onclick: () => post("/reopen") }) : null;
+  // signs of AI prose (backend/app/manuscript/style.py): 0 — none found
+  const sc = s.style_score;
+  const styleBadge = sc == null || !s.versions.length ? null : el("span", { class: "badge " + (sc >= 40 ? "danger" : sc >= 15 ? "exploratory" : "ok"),
+    title: "Сколько в тексте примет ИИ-стиля (слова-маркеры, шаблоны, одинаковый ритм) на 1000 слов; подробности — во вкладке «Проверки»",
+    text: `ИИ-стиль: ${sc}` });
+  const humanize = s.versions.length && s.kind !== "statements" ? el("button", { class: "small", text: "Убрать ИИ-стиль", disabled: !llmOn,
+    title: "переписать найденные места академическим языком, не меняя фактов, чисел и ссылок" }) : null;
+  if (humanize) humanize.addEventListener("click", () => busy(humanize, () => post("/humanize")));
 
   if (!state.msView) state.msView = "preview";
   const views = [["preview", "Просмотр"], ["edit", "Редактор"], ["issues", `Проверки (${s.issues.length})`], ["versions", `Версии (${s.versions.length})`]];
@@ -674,7 +684,7 @@ function sectionEditor(p, m, s, reload) {
   return el("div", { class: "card stack" },
     el("div", { class: "row between" }, el("div", {}, el("h2", { text: s.heading }),
       s.plan ? el("div", { class: "small muted", text: "План: " + s.plan.points.join(" · ") + (s.plan.words ? ` (${s.plan.words} слов)` : "") }) : null),
-      el("div", { class: "row" }, gen, accept, reopen)),
+      el("div", { class: "row" }, styleBadge, humanize, gen, accept, reopen)),
     s.stale ? el("div", { class: "banner warn small", text: "Входные данные раздела изменились (находки, анализ, литература или данные автора) — перегенерируйте или проверьте текст (FR-0.4)." }) : null,
     last?.questions?.length ? el("div", { class: "banner info small" }, el("strong", { text: "Агент просит уточнить:" }), el("ul", {}, last.questions.map((q) => el("li", { text: q })))) : null,
     last?.citations_report?.length ? el("div", { class: "small muted", text: "Новые цитаты: " + last.citations_report.map((r) => `${r.marker} → ${r.status === "added" ? r.citation + " (" + r.verification + ")" : "отклонена: " + r.reason}`).join("; ") }) : null,

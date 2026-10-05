@@ -23,7 +23,7 @@ function el(tag, attrs, ...children) {
 }
 
 // Long operations run as background jobs (mirrors LONG_OPERATIONS in backend/app/jobs.py).
-const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/literature\/pdf$/, /\/literature\/discover$/, /\/manuscript\/consistency$/, /\/manuscript\/review$/, /\/manuscript\/revision$/, /\/manuscript\/revision\/points\/[^/]+\/(draft|apply)$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
+const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/literature\/pdf$/, /\/literature\/discover$/, /\/manuscript\/consistency$/, /\/manuscript\/review$/, /\/manuscript\/sections\/[^/]+\/humanize$/, /\/manuscript\/revision$/, /\/manuscript\/revision\/points\/[^/]+\/(draft|apply)$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
   /\/literature\/sources\/[^/]+\/extract$/, /\/literature\/findings\/[^/]+\/compare$/, /\/literature\/ground$/,
   /\/literature\/retractions$/, /\/manuscript\/terms\/auto$/, /\/manuscript\/plan$/, /\/manuscript\/sections\/[^/]+\/generate$/,
   /\/manuscript\/sections\/[^/]+\/revise$/, /\/manuscript\/front\/generate$/, /\/cover\/generate$/, /\/cover\/revise$/,
@@ -392,7 +392,8 @@ async function viewData(root, p) {
       el("div", { class: "row" }, btn,
         el("span", { class: "hint", text: "До подтверждения запросы к внешней LLM для проекта заблокированы." }))));
   }
-  root.replaceChildren(el("div", { class: "stack" }, parts));
+  const ds = await api(`/projects/${p.id}/dataset`).catch(() => ({ deleted: [] }));
+  root.replaceChildren(el("div", { class: "stack" }, parts, trashCard(p, ds)));
 }
 
 function reportCard(p, rep) {
@@ -448,7 +449,7 @@ function dataTable(columns, rows, opts = {}) {
 async function viewCases(root, p) {
   const ds = await api(`/projects/${p.id}/dataset`);
   if (!ds.rows.length) {
-    root.replaceChildren(el("div", { class: "card empty" }, "Данные ещё не подтверждены. ", el("a", { href: `#/p/${p.id}/data`, text: "Загрузить данные" })));
+    root.replaceChildren(el("div", { class: "stack" }, el("div", { class: "card empty" }, "Данные ещё не подтверждены. ", el("a", { href: `#/p/${p.id}/data`, text: "Загрузить данные" })), trashCard(p, ds)));
     return;
   }
   const tabs = el("div", { class: "tabs" }, [["table", `Случаи × признаки (${ds.rows.length})`], ["dictionary", "Словарь данных"]].map(([id, label]) =>
@@ -501,19 +502,41 @@ function casesTable(p, ds) {
       return td;
     })))));
   return el("div", { class: "stack" },
-    extractionCard(p, ds),
+    extractionCard(p, ds), trashCard(p, ds),
     ds.problems.length ? el("div", { class: "banner warn", text: `Проблемных значений: ${ds.problems.length}. Они исключаются из анализа, пока не будут исправлены.` }) : null,
     legend, el("div", { class: "table-wrap" }, table));
+}
+
+function trashCard(p, ds) {
+  const items = ds.deleted || [];
+  if (!items.length) return null;
+  return el("details", { class: "card" }, el("summary", { text: `Удалённые случаи (${items.length}) — можно восстановить` }),
+    el("div", { class: "stack", style: "margin-top:8px" }, items.map((x) => {
+      const restore = el("button", { class: "small primary", text: "Восстановить" });
+      restore.addEventListener("click", () => busy(restore, async () => {
+        const r = await api(`/projects/${p.id}/dataset/deleted/${encodeURIComponent(x.case_id)}/restore`, { method: "POST" });
+        state.project = r.project;
+        toast(`Случай ${x.case_id} восстановлен; перезапустите анализ, чтобы учесть изменения`);
+        if (location.hash.endsWith("/cases")) route(); else location.hash = `#/p/${p.id}/cases`;
+      }));
+      const purge = el("button", { class: "small ghost", text: "Удалить навсегда" });
+      purge.addEventListener("click", () => {
+        if (!confirm(`Удалить случай ${x.case_id} навсегда? Восстановить его будет нельзя.`)) return;
+        busy(purge, async () => { await api(`/projects/${p.id}/dataset/deleted/${encodeURIComponent(x.case_id)}`, { method: "DELETE" }); route(); });
+      });
+      return el("div", { class: "row", style: "border-bottom:1px solid var(--border);padding:4px 0" },
+        el("span", { class: "mono", text: x.case_id }), el("span", { class: "small muted grow", text: `${x.preview.join(" · ")} — удалён ${fmtDate(x.deleted_at)}` }), restore, purge);
+    })));
 }
 
 function deleteCaseButton(p, caseId) {
   const b = el("button", { class: "small ghost", text: "✕", title: `удалить случай ${caseId}` });
   b.addEventListener("click", () => {
-    if (!confirm(`Удалить случай ${caseId} из таблицы? Его данные будут удалены из проекта (действие необратимо). После удаления перезапустите анализ.`)) return;
+    if (!confirm(`Удалить случай ${caseId} из таблицы? Он попадёт в «Удалённые случаи» — его можно будет восстановить. После удаления перезапустите анализ.`)) return;
     busy(b, async () => {
       const r = await api(`/projects/${p.id}/dataset/cases/${encodeURIComponent(caseId)}`, { method: "DELETE" });
       state.project = r.project;
-      toast(r.rows.length ? `Случай ${caseId} удалён; перезапустите анализ, чтобы учесть изменения` : "Удалён последний случай — загрузите данные заново");
+      toast(r.rows.length ? `Случай ${caseId} перемещён в «Удалённые случаи»; перезапустите анализ, чтобы учесть изменения` : "Удалён последний случай — восстановите его или загрузите данные заново");
       if (r.rows.length) route(); else location.hash = `#/p/${p.id}/data`;
     });
   });

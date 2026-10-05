@@ -11,6 +11,7 @@ import re
 from .. import llm
 from ..config import MODEL_EXTRACTION, MODEL_REASONING
 from ..literature.agent import _run_with_search
+from . import style
 
 FALLBACK = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
@@ -163,8 +164,20 @@ def _system(ctx, kind=None):
     else:
         rules = WRITING_RULES.format(variant=ctx.get("language_variant") or "consistent (British or American)",
                                      tone=ctx.get("tone") or "clinico-pathological, precise")
+    lang = "ru" if _russian(ctx, kind) else "en"
     return ("You are drafting one section of a pathology manuscript together with its author.\n\n"
-            + rules + "\n\n" + CITATION_RULES)
+            + rules + "\n\n" + style.rules(lang) + "\n\n" + CITATION_RULES)
+
+
+def _examples_block(ctx, kind):
+    """Human-written passages (the author's own text, published articles of the project's literature) whose register
+    the model imitates; few-shot style examples reduce the generic "model voice"."""
+    ex = (ctx.get("style_examples") or {}).get("ru" if _russian(ctx, kind) else "en") or []
+    if not ex:
+        return ""
+    body = "\n\n".join(f"<<<\n{e}\n>>>" for e in ex)
+    return ("\nStyle examples — human-written academic text. Match their register, sentence rhythm and density of "
+            "terms; do not copy their content or claims:\n" + body + "\n")
 
 
 def _instruction(ctx, kind):
@@ -213,7 +226,8 @@ def write_section(project, section, ctx, search_fn=None, extra_sources=None):
             f"Plan for this section: {json.dumps(section.get('plan') or {}, ensure_ascii=False)}\n"
             f"Word budget: {section.get('budget') or 'not set'}\n\n"
             f"Study context:\n{_context_block(ctx)}\n\nFacts (copy the placeholder exactly, with double curly braces and "
-            f"no backticks; the value after = is only for your reasoning):\n{_facts_block(ctx)}\n")
+            f"no backticks; the value after = is only for your reasoning):\n{_facts_block(ctx)}\n"
+            + _examples_block(ctx, kind))
     if extra_sources:
         user += "\nAccepted sections of the manuscript (source text with placeholders):\n" + extra_sources
     purpose = f"write_section:{kind}"

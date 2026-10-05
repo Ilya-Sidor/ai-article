@@ -106,8 +106,26 @@ def context(pid, state=None):
         "tables": [t for t in tables if t["include"]], "figures": [f for f in figures_ if f["include"]],
         "all_tables": tables, "all_figures": figures_,
         "inputs": state.get("inputs"), "log": _log_summary(analysis) if analysis and not case_report else None,
+        "style_examples": _style_examples(pid, state),
     }
     return ctx, state
+
+
+def _style_examples(pid, state):
+    """{"en": [...], "ru": [...]}: the author's sample of their own writing first, then up to two passages from the
+    introduction/discussion of full-text sources (human-written; style only, never content)."""
+    out = {"en": [], "ru": []}
+    sample = ((state.get("inputs") or {}).get("style_sample") or "").strip()
+    if sample:
+        out["ru" if re.search("[А-Яа-яЁё]", sample) else "en"].append(sample[:2500])
+    for c in lit.chunks(store, pid):
+        if len(out["en"]) >= 3:
+            break
+        sec = (c.get("section") or "").lower()
+        text = c.get("text") or ""
+        if re.search(r"discussion|introduction|обсужд|введени", sec) and 400 <= len(text) <= 1500:
+            out["ru" if re.search("[А-Яа-яЁё]{20}", text) else "en"].append(text)
+    return out
 
 
 def _fingerprints(ctx, state):
@@ -285,6 +303,7 @@ def _view(pid, ctx, state):
             "versions": [{k: v.get(k) for k in ("n", "ts", "actor", "note", "questions")} for v in s["versions"]],
             "accepted_version": s.get("accepted_version"), "comments": s["comments"],
             "words": counts["sections"].get(s["key"]), "budget": budgets.get(s["key"]),
+            "style_score": (counts.get("style") or {}).get(s["key"]),
             "whitelist": s.get("number_whitelist") or [],
             "issues": [i for i in issues if i["section"] == s["key"]],
             "plan": next((p for p in (state.get("plan") or {}).get("sections", []) if ms.slug(p["heading"]) == s["key"]),
@@ -560,6 +579,40 @@ def generate_section(pid: str, key: str):
                     "queries": out.get("queries", [])})
     ms.save(store, pid, state)
     store.audit(pid, "agent", "manuscript.section_generated", {"section": key, "new_citations": len(report)})
+    if sec["kind"] != "statements":  # a draft that still reads like a model gets one targeted style pass
+        st = _style_of(pid, ctx, state, key)
+        if st["score"] >= AUTO_STYLE_SCORE:
+            _humanize(pid, key, st, ctx["lang"] if sec["kind"] != "abstract_en" else "en", "стилистическая правка (автоматически)")
+    return get_manuscript(pid)
+
+
+AUTO_STYLE_SCORE = 40
+
+
+def _style_of(pid, ctx, state, key):
+    from .manuscript import style
+    sec = state["sections"][key]
+    lang = "en" if sec["kind"] == "abstract_en" else ctx["lang"]
+    return style.analyze(_renderer(pid, ctx, state).text(ms.current_source(sec), sec["kind"]), lang)
+
+
+def _humanize(pid, key, st, lang, note):
+    from .manuscript import style
+    revise(pid, key, ReviseIn(instruction=style.humanize_instruction(st, lang), selection=None))
+    state = ms.load(store, pid)
+    state["sections"][key]["versions"][-1]["note"] = note
+    ms.save(store, pid, state)
+
+
+@router.post("/projects/{pid}/manuscript/sections/{key}/humanize")
+def humanize_section(pid: str, key: str):
+    """«Убрать ИИ-стиль»: a targeted rewrite of the markers found, keeping facts, placeholders and citations."""
+    ctx, state = context(pid)
+    sec = _section(state, key)
+    if not ms.current_source(sec):
+        raise HTTPException(400, "раздел ещё не написан")
+    st = _style_of(pid, ctx, state, key)
+    _humanize(pid, key, st, "en" if sec["kind"] == "abstract_en" else ctx["lang"], "убран ИИ-стиль")
     return get_manuscript(pid)
 
 

@@ -18,6 +18,8 @@ SECTION_ACTIONS = {
     "markup": ("revise", "Перепиши формулу в этом фрагменте обычным текстом с символами Unicode (≥, ≤, ±, χ²)."),
     "abbreviation": ("revise", "Расшифруй аббревиатуру при первом упоминании. Остальное не меняй."),
     "budget": ("revise", "Сократи раздел до бюджета слов, сохранив все числа, ссылки и ключевые утверждения."),
+    "ai_repeat": ("revise", "Начни обсуждение с главного результата этой работы, а не с повторения определения из "
+                            "введения. Остальной текст не меняй."),
     "novelty_claim": ("revise", "Смягчи утверждение о новизне: похожие случаи уже опубликованы. Напиши, чем этот "
                                 "случай отличается от описанных, без слов «впервые»/«first»."),
     "overlap": ("revise", "Перефразируй этот фрагмент своими словами (он совпадает с текстом источника), сохранив "
@@ -56,6 +58,8 @@ def annotate(issue, sections):
                         "instruction": issue.get("suggestion") or "", "selection": frag[:300] if code == "consistency" else None})
         if issue.get("remark"):
             actions.append({"type": "remark", "id": issue["remark"], "status": "dismissed", "label": "Не согласен"})
+    elif code in ("ai_style", "ai_rhythm") and goto:
+        actions.append({"type": "humanize", "section": issue["section"], "label": "Убрать ИИ-стиль (ИИ)"})
     elif code in SECTION_ACTIONS and goto:
         actions.append({"type": "revise", "section": issue["section"], "label": "Исправить с помощью ИИ",
                         "instruction": SECTION_ACTIONS[code][1],

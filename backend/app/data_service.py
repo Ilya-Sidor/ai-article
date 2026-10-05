@@ -98,7 +98,8 @@ def confirm(store: ProjectStore, pid: str) -> dict:
         rows = frame["_source_row"].tolist()
         if dataset is None:
             dataset = frame.drop(columns=["_source_row"])
-            dataset.insert(0, "case_id", ["C-%03d" % (i + 1) for i in range(len(dataset))])
+            first = max([_case_key(x["case_id"]) for x in deleted_cases(store, pid)] + [0])  # ids in the trash too
+            dataset.insert(0, "case_id", ["C-%03d" % (first + i + 1) for i in range(len(dataset))])
             for cid, r in zip(dataset["case_id"], rows):
                 provenance.setdefault(cid, []).append({"file": rep["file"], "row": int(r)})
             continue
@@ -113,7 +114,8 @@ def confirm(store: ProjectStore, pid: str) -> dict:
             link = None
         dataset = _merge(dataset, frame, link, rep["file"])
         missing_ids = dataset["case_id"].isna()
-        start = max([int(c[2:]) for c in before if str(c)[2:].isdigit()] + [0])  # never reuse a deleted case's id
+        start = max([int(c[2:]) for c in before if str(c)[2:].isdigit()]  # never reuse an id, even one in the trash
+                    + [_case_key(x["case_id"]) for x in deleted_cases(store, pid)] + [0])
         new_ids = ["C-%03d" % (start + i + 1) for i in range(int(missing_ids.sum()))]
         dataset.loc[missing_ids, "case_id"] = new_ids
         if not link:
@@ -141,7 +143,8 @@ def confirm(store: ProjectStore, pid: str) -> dict:
 def dataset_view(store: ProjectStore, pid: str) -> dict:
     df = store.dataset(pid)
     if df is None:
-        return {"columns": [], "rows": [], "provenance": {}, "problems": [], "dictionary": []}
+        return {"columns": [], "rows": [], "provenance": {}, "problems": [], "dictionary": [],
+                "deleted": _trash_view(store, pid)}
     d = store.dir(pid)
     dictionary = read_json(d / "dictionary.json", [])
     _, problems = prepare_analysis_frame(df, dictionary)
@@ -150,7 +153,16 @@ def dataset_view(store: ProjectStore, pid: str) -> dict:
         "provenance": read_json(d / "provenance.json", {}), "problems": problems, "dictionary": dictionary,
         "extracted": read_json(d / "extracted.json", {}), "conflicts": read_json(d / "extraction_conflicts.json", []),
         "text_columns": [v["name"] for v in dictionary if v.get("vtype") == "text"],
+        "deleted": _trash_view(store, pid),
     }
+
+
+def _trash_view(store, pid):
+    out = []
+    for x in deleted_cases(store, pid):
+        values = [v for k, v in x["row"].items() if k != "case_id" and v and len(v) < 40][:4]
+        out.append({"case_id": x["case_id"], "deleted_at": x["deleted_at"], "preview": values})
+    return out
 
 
 def edit_cell(store: ProjectStore, pid: str, case_id: str, column: str, value: str):
@@ -169,19 +181,33 @@ def edit_cell(store: ProjectStore, pid: str, case_id: str, column: str, value: s
     store.audit(pid, "author", "dataset.cell_edited", {"case_id": case_id, "column": column, "old": old, "new": value})
 
 
+TRASH = "deleted_cases.json"
+
+
+def deleted_cases(store, pid):
+    return read_json(store.dir(pid) / TRASH, [])
+
+
 def delete_case(store: ProjectStore, pid: str, case_id: str) -> dict:
-    """Remove one case (patient) from the case table with its provenance and AI-extraction marks."""
+    """Move one case (patient) out of the case table into the project's trash (restorable): the row, its
+    provenance and AI-extraction marks go together, so a restore brings everything back."""
     df = store.dataset(pid)
     if df is None or not (df["case_id"] == case_id).any():
         raise DataError("случай не найден")
     d = store.dir(pid)
+    entry = {"case_id": case_id, "deleted_at": now_iso(),
+             "row": {k: ("" if pd.isna(v) else str(v)) for k, v in df[df["case_id"] == case_id].iloc[0].items()}}
     df = df[df["case_id"] != case_id].reset_index(drop=True)
     for name in ("provenance.json", "extracted.json"):
         data = read_json(d / name, {})
-        if data.pop(case_id, None) is not None:
+        removed = data.pop(case_id, None)
+        if removed is not None:
+            entry[name] = removed
             write_json(d / name, data)
-    conflicts = [c for c in read_json(d / "extraction_conflicts.json", []) if c.get("case_id") != case_id]
-    write_json(d / "extraction_conflicts.json", conflicts)
+    conflicts = read_json(d / "extraction_conflicts.json", [])
+    entry["conflicts"] = [c for c in conflicts if c.get("case_id") == case_id]
+    write_json(d / "extraction_conflicts.json", [c for c in conflicts if c.get("case_id") != case_id])
+    write_json(d / TRASH, [x for x in deleted_cases(store, pid) if x["case_id"] != case_id] + [entry])
     if df.empty:  # the last case: back to the upload step
         for name in ("dataset.csv", "dictionary.json"):
             if (d / name).exists():
@@ -195,6 +221,53 @@ def delete_case(store: ProjectStore, pid: str, case_id: str) -> dict:
         p = store.update(pid, n_cases=int(len(df)))
     store.audit(pid, "author", "dataset.case_deleted", {"case_id": case_id, "n_cases": int(len(df))})
     return p
+
+
+def _case_key(cid):
+    return int(cid[2:]) if str(cid)[2:].isdigit() else 10**9
+
+
+def restore_case(store: ProjectStore, pid: str, case_id: str) -> dict:
+    """Put a deleted case back (columns that appeared since are left empty for it)."""
+    trash = deleted_cases(store, pid)
+    entry = next((x for x in trash if x["case_id"] == case_id), None)
+    if entry is None:
+        raise DataError("в корзине нет такого случая")
+    d = store.dir(pid)
+    df = store.dataset(pid)
+    row = pd.DataFrame([entry["row"]])
+    df = row if df is None else pd.concat([df, row], ignore_index=True, sort=False)
+    cols = ["case_id"] + [c for c in df.columns if c != "case_id"]
+    df = df[cols].fillna("")
+    df = df.iloc[sorted(range(len(df)), key=lambda i: _case_key(df["case_id"].iloc[i]))].reset_index(drop=True)
+    store.save_frame(d / "dataset.csv", df)
+    for name in ("provenance.json", "extracted.json"):
+        if name in entry:
+            data = read_json(d / name, {})
+            data[case_id] = entry[name]
+            write_json(d / name, data)
+    if entry.get("conflicts"):
+        write_json(d / "extraction_conflicts.json", read_json(d / "extraction_conflicts.json", []) + entry["conflicts"])
+    old = {v["name"]: v for v in read_json(d / "dictionary.json", [])}
+    write_json(d / "dictionary.json", [old.get(v["name"], v) if old.get(v["name"], {}).get("edited") else v
+                                       for v in build_dictionary(df)])
+    write_json(d / TRASH, [x for x in trash if x["case_id"] != case_id])
+    project = store.get(pid)
+    changes = {"n_cases": int(len(df))}
+    if project["stage"] == "created":  # the data had been confirmed before it was deleted
+        changes.update(stage="data_confirmed", anonymization={"status": "confirmed", "confirmed_at": now_iso()})
+    p = store.update(pid, **changes)
+    store.audit(pid, "author", "dataset.case_restored", {"case_id": case_id, "n_cases": int(len(df))})
+    return p
+
+
+def purge_case(store: ProjectStore, pid: str, case_id: str):
+    """Delete a case from the trash for good."""
+    trash = deleted_cases(store, pid)
+    if not any(x["case_id"] == case_id for x in trash):
+        raise DataError("в корзине нет такого случая")
+    write_json(store.dir(pid) / TRASH, [x for x in trash if x["case_id"] != case_id])
+    store.audit(pid, "author", "dataset.case_purged", {"case_id": case_id})
 
 
 ALLOWED_VTYPES = {"binary", "categorical", "ordinal", "quantitative", "identifier", "text"}

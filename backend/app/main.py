@@ -316,6 +316,24 @@ def delete_case(pid: str, case_id: str):
     return {"project": project, **data_service.dataset_view(store, pid)}
 
 
+@app.post("/api/projects/{pid}/dataset/deleted/{case_id}/restore")
+def restore_case(pid: str, case_id: str):
+    try:
+        project = data_service.restore_case(store, pid, case_id)
+    except data_service.DataError as exc:
+        raise HTTPException(404, str(exc))
+    return {"project": project, **data_service.dataset_view(store, pid)}
+
+
+@app.delete("/api/projects/{pid}/dataset/deleted/{case_id}")
+def purge_case(pid: str, case_id: str):
+    try:
+        data_service.purge_case(store, pid, case_id)
+    except data_service.DataError as exc:
+        raise HTTPException(404, str(exc))
+    return data_service.dataset_view(store, pid)
+
+
 @app.post("/api/projects/{pid}/dataset/extract")
 def extract_from_text(pid: str, body: ExtractIn):
     """FR-1.7: features from the (anonymised) report texts; each value keeps its quote."""

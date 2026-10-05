@@ -26,6 +26,7 @@ LONG_OPERATIONS = [
     (r"/literature/discover$", "Поиск похожих публикаций и журналов"),
     (r"/manuscript/consistency$", "Проверка согласованности"),
     (r"/manuscript/review$", "Рецензирование (ИИ)"),
+    (r"/manuscript/sections/[^/]+/humanize$", "Стилистическая правка"),
     (r"/manuscript/revision$", "Разбор замечаний рецензентов"),
     (r"/manuscript/revision/points/[^/]+/draft$", "Ответ рецензенту"),
     (r"/manuscript/revision/points/[^/]+/apply$", "Правка текста по замечанию"),

@@ -139,3 +139,37 @@ def test_delete_last_case_returns_to_upload(api):
     api.post(f"/api/projects/{pid}/anonymization/confirm")
     r = api.delete(f"/api/projects/{pid}/dataset/cases/C-001").json()
     assert r["rows"] == [] and r["project"]["stage"] == "created" and r["project"]["anonymization"]["status"] == "none"
+
+
+def test_restore_deleted_case(api):
+    from generate_sample import generate
+    pid = api.post("/api/projects", json={"title": "Restore"}).json()["id"]
+    api.post(f"/api/projects/{pid}/uploads", files={"files": ("s.csv", generate().to_csv(index=False).encode())})
+    api.post(f"/api/projects/{pid}/anonymization/confirm")
+    before = api.get(f"/api/projects/{pid}/dataset").json()
+    row = next(r for r in before["rows"] if r["case_id"] == "C-005")
+    r = api.delete(f"/api/projects/{pid}/dataset/cases/C-005").json()
+    assert r["deleted"][0]["case_id"] == "C-005" and len(r["rows"]) == 23
+    # a new upload does not take the id of the case in the trash
+    api.post(f"/api/projects/{pid}/uploads", files={"files": ("t.csv", b"Age,Sex\n50,M\n")})
+    api.post(f"/api/projects/{pid}/anonymization/confirm")
+    r = api.post(f"/api/projects/{pid}/dataset/deleted/C-005/restore").json()
+    ids = [x["case_id"] for x in r["rows"]]
+    assert ids.index("C-005") == 4 and len(ids) == len(set(ids)) == 25 and r["deleted"] == []
+    restored = next(x for x in r["rows"] if x["case_id"] == "C-005")
+    assert all(restored[k] == v for k, v in row.items()) and restored.get("Age", "") == ""
+    assert r["provenance"]["C-005"] == before["provenance"]["C-005"] and r["project"]["n_cases"] == 25
+    # purge: gone for good
+    api.delete(f"/api/projects/{pid}/dataset/cases/C-005")
+    assert api.delete(f"/api/projects/{pid}/dataset/deleted/C-005").status_code == 200
+    assert api.post(f"/api/projects/{pid}/dataset/deleted/C-005/restore").status_code == 404
+
+
+def test_restore_last_case_reopens_the_project(api):
+    pid = api.post("/api/projects", json={"title": "One", "article_type": "case_report"}).json()["id"]
+    api.post(f"/api/projects/{pid}/uploads", files={"files": ("c.csv", "Возраст\n54\n".encode())})
+    api.post(f"/api/projects/{pid}/anonymization/confirm")
+    api.delete(f"/api/projects/{pid}/dataset/cases/C-001")
+    r = api.post(f"/api/projects/{pid}/dataset/deleted/C-001/restore").json()
+    assert [x["case_id"] for x in r["rows"]] == ["C-001"] and r["project"]["stage"] == "data_confirmed"
+    assert r["project"]["anonymization"]["status"] == "confirmed"
