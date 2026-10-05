@@ -126,6 +126,17 @@ function msFix(p, rerender) {
   return box;
 }
 
+// BSI transliteration of Russian names (mirrors backend/app/manuscript/titlepage.py)
+const BSI = { а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "i", к: "k", л: "l", м: "m", н: "n",
+  о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "kh", ц: "ts", ч: "ch", ш: "sh", щ: "shch", ъ: '"', ы: "y", ь: "'", э: "e", ю: "iu", я: "ia" };
+function bsi(text) {
+  return [...text].map((ch) => {
+    const t = BSI[ch.toLowerCase()];
+    if (t === undefined) return ch;
+    return ch !== ch.toLowerCase() && t ? t[0].toUpperCase() + t.slice(1) : t;
+  }).join("");
+}
+
 /* ---------- 1. terminology ---------- */
 
 function msTerms(p, m, reload) {
@@ -163,14 +174,44 @@ function msInputs(p, m, reload) {
     node.addEventListener("change", () => { obj[last] = node.value; });
     return el("label", { class: "field" }, el("span", { text: label }), node);
   };
-  const authors = el("textarea", { style: "min-height:70px", placeholder: "Одна строка — один автор: Имя Фамилия; Conceptualization, Formal analysis" },
-    (inp.authors || []).map((a) => `${a.name}; ${(a.roles || []).join(", ")}`).join("\n"));
-  authors.addEventListener("change", () => {
-    inp.authors = authors.value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-      const [name, roles] = l.split(";");
-      return { name: name.trim(), roles: (roles || "").split(",").map((r) => r.trim()).filter(Boolean) };
+  // authors and affiliations (title page; bilingual for Russian journals)
+  inp.authors = inp.authors || [];
+  inp.affiliations = inp.affiliations || [];
+  const ruJ = m.lang === "ru";
+  const authorsBox = el("div", { class: "stack", style: "gap:8px" });
+  const cell = (obj, key, ph, opts = {}) => {
+    const i = el("input", { value: Array.isArray(obj[key]) ? obj[key].join(", ") : (obj[key] || ""), placeholder: ph, style: opts.w ? `width:${opts.w}` : "" });
+    i.addEventListener("change", () => { obj[key] = opts.list ? i.value.split(",").map((x) => opts.num ? parseInt(x, 10) : x.trim()).filter((x) => opts.num ? x > 0 : x) : i.value.trim(); });
+    return i;
+  };
+  const drawAuthors = () => {
+    const affRows = inp.affiliations.map((a, i) => el("tr", {}, el("td", { class: "mono", text: String(i + 1) }),
+      el("td", {}, cell(a, "name", "ФГБУ «…», Москва")), ruJ ? el("td", {}, cell(a, "name_en", "Official English name")) : null,
+      el("td", {}, cell(a, "address", "адрес, город, индекс, страна")),
+      el("td", {}, el("button", { class: "small ghost", text: "✕", onclick: () => { inp.affiliations.splice(i, 1); drawAuthors(); } }))));
+    const autRows = inp.authors.map((a, i) => {
+      const corr = el("input", { type: "radio", name: "corr", checked: !!a.corresponding, onchange: () => { inp.authors.forEach((x) => { x.corresponding = x === a; }); } });
+      const translit = ruJ ? el("button", { class: "small ghost", text: "латиницей", title: "транслитерация BSI", onclick: async () => {
+        a.name_en = bsi(a.name || ""); drawAuthors(); } }) : null;
+      return el("tr", {}, el("td", {}, cell(a, "name", "Иванов Иван Иванович")),
+        ruJ ? el("td", {}, el("div", { class: "row", style: "gap:4px;flex-wrap:nowrap" }, cell(a, "name_en", "Ivanov II"), translit)) : null,
+        el("td", {}, cell(a, "position", "должность")), el("td", {}, cell(a, "affiliations", "1, 2", { list: true, num: true, w: "60px" })),
+        el("td", {}, cell(a, "email", "e-mail")), el("td", {}, cell(a, "orcid", "0000-0000-0000-0000", { w: "150px" })),
+        el("td", {}, cell(a, "roles", "Conceptualization, Formal analysis", { list: true })), el("td", { style: "text-align:center" }, corr),
+        el("td", {}, el("button", { class: "small ghost", text: "✕", onclick: () => { inp.authors.splice(i, 1); drawAuthors(); } })));
     });
-  });
+    authorsBox.replaceChildren(
+      el("h4", { text: "Учреждения" }),
+      el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, el("tr", {}, ["№", "Название" + (ruJ ? " (рус.)" : ""), ruJ ? "Название (англ.)" : null, "Адрес", ""].filter((x) => x !== null).map((h) => el("th", { text: h })))),
+        el("tbody", {}, affRows))),
+      el("div", {}, el("button", { class: "small", text: "+ учреждение", onclick: () => { inp.affiliations.push({}); drawAuthors(); } })),
+      el("h4", { text: "Авторы (в порядке на титульном листе)" }),
+      el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, el("tr", {}, ["ФИО", ruJ ? "ФИО латиницей (BSI)" : null, "Должность", "Учр. №", "E-mail", "ORCID", "Роли CRediT", "Переписка", ""].filter((x) => x !== null).map((h) => el("th", { text: h })))),
+        el("tbody", {}, autRows))),
+      el("div", {}, el("button", { class: "small", text: "+ автор", onclick: () => { inp.authors.push({ roles: [] }); drawAuthors(); } })),
+      el("p", { class: "hint small", text: ruJ ? "Журнал требует титульный блок на русском и английском, транслитерацию фамилий по BSI, ORCID подающего автора и сведения об авторах на отдельной странице — всё это собирается при экспорте автоматически." : "Номера учреждений ставятся надстрочными индексами у фамилий; автор для переписки указывается на титульном листе." }));
+  };
+  drawAuthors();
   const waiver = el("input", { type: "checkbox", checked: !!(inp.ethics || {}).waiver, onchange: (e) => { inp.ethics = inp.ethics || {}; inp.ethics.waiver = e.target.checked; } });
   const consent = el("select", { onchange: (e) => { inp.consent = inp.consent || {}; inp.consent.status = e.target.value; } },
     [["", "—"], ["written", "письменное согласие получено"], ["waived", "не требовалось (ретроспективно, анонимизировано)"], ["not_applicable", "не применимо"]]
@@ -203,8 +244,8 @@ function msInputs(p, m, reload) {
       markerRows("ihc", "ihc", [["clone", "Клон"], ["vendor", "Производитель"], ["dilution", "Разведение"], ["platform", "Платформа"], ["retrieval", "Демаскировка"], ["scoring", "Оценка"]])),
     el("div", { class: "card stack" }, el("h3", { text: "Молекулярные методы" }),
       markerRows("molecular", "molecular", [["method", "Метод"], ["panel", "Панель / праймеры"], ["platform", "Платформа"], ["details", "Детали"]])),
-    el("div", { class: "card stack" }, el("h3", { text: "Заявления (FR-5.10)" }),
-      el("label", { class: "field" }, el("span", { text: "Авторы и роли CRediT" }), authors),
+    el("div", { class: "card stack" }, el("h3", { text: "Авторы, учреждения и заявления" }),
+      authorsBox,
       el("div", { class: "form-grid" }, field("Этический комитет", "ethics.committee"), field("Номер одобрения", "ethics.approval_number"),
         field("Дата", "ethics.approval_date")),
       el("label", { class: "row small" }, waiver, "одобрение не требовалось (waiver)"),

@@ -15,7 +15,7 @@ from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
 from .manuscript import agent, assets, case as mcase, checks as mchecks, export, facts as mfacts, lang as mlang
-from .manuscript import fixes, statements
+from .manuscript import fixes, statements, titlepage
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -167,6 +167,7 @@ def _check(pid, ctx, state, renderer):
         issues.append({"section": None, "heading": "терминология", "severity": "blocking", "code": "untranslated",
                        "message": "нет английского перевода: " + "; ".join(what), "fragment": "",
                        "suggestion": "«1. Терминология» → «Перевести автоматически» или впишите перевод"})
+    issues += titlepage.issues(state.get("inputs"), ctx["lang"])
     if ctx["case_report"]:
         issues += mcase.care_issues(sections, renderer, state.get("front"), state.get("inputs"), ctx["template"])
     # citations used in the text must be decided and verified
@@ -813,6 +814,7 @@ def do_export(pid: str, mode: str = "draft"):
     sections = [(s["heading"], s["kind"], ms.current_source(s)) for s in ms.ordered(state)]
     ectx = {"renderer": renderer, "front": state.get("front") or {}, "sections": sections, "tables": tables,
             "figures": figures_, "counts": st["counts"], "authors": (state.get("inputs") or {}).get("authors"),
+            "inputs": state.get("inputs") or {},
             "figure_format": fmt, "dpi": int(dpi), "terms": state["terms"], "lang": lang,
             "figure_language": _figure_language(ctx, state)}
     if ctx["case_report"]:

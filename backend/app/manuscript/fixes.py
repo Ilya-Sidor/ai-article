@@ -77,6 +77,8 @@ def annotate(issue, sections):
             actions.append({"type": "revise", "section": target["key"], "label": "Дописать с помощью ИИ",
                             "instruction": f"Добавь недостающий пункт CARE: {issue['message'].split(': ', 1)[-1]}. "
                                            "Используй только данные случая; чего нет в данных — [уточнить: …]."})
+    elif code.startswith("titlepage_"):
+        where, goto = "Данные автора → авторы и учреждения", {"step": "draft", "tab": "inputs"}
     elif code == "no_journal":
         where, goto = "Проект → целевой журнал", {"step": "project"}
     elif code.startswith("journal_"):

@@ -14,7 +14,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 from ..analysis import figures as figs
-from . import lang as L
+from . import lang as L, titlepage
 from .render import Renderer, plain_text as _t
 
 
@@ -89,6 +89,38 @@ def _add_table(doc, number, table, lang="en"):
         doc.add_paragraph(_t(table["footnote"])).runs[0].font.size = Pt(10)
 
 
+def _title_page(doc, inputs, front, lang):
+    """Title, authors with affiliation superscripts, affiliations; repeated in English for Russian journals."""
+    for kind, payload in titlepage.blocks(inputs, front, lang):
+        if kind == "title":
+            doc.add_heading(_t(payload), level=0)
+        elif kind == "authors":
+            p = doc.add_paragraph()
+            for i, (name, sup) in enumerate(payload):
+                p.add_run(_t(name) if i == 0 else ", " + _t(name)).bold = True
+                if sup:
+                    p.add_run(sup).font.superscript = True
+        elif kind == "affiliation":
+            sup, text = payload
+            p = doc.add_paragraph()
+            p.add_run(sup).font.superscript = True
+            p.add_run(" " + _t(text)).italic = True
+        elif kind == "break":
+            doc.add_paragraph()
+        else:
+            doc.add_paragraph(_t(payload))
+
+
+def _authors_page(doc, inputs, lang):
+    rows = titlepage.authors_page(inputs, lang)
+    if not rows:
+        return
+    doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+    doc.add_heading("Сведения об авторах" if lang == "ru" else "Author details", level=1)
+    for r in rows:
+        doc.add_paragraph(_t(r), style="List Bullet")
+
+
 def build_docx(ctx, draft, issues):
     """ctx: title/front, sections [(heading, kind, source)], renderer, tables, figures, bibliography."""
     r: Renderer = ctx["renderer"]
@@ -101,11 +133,7 @@ def build_docx(ctx, draft, issues):
     front = ctx["front"]
     lang = ctx.get("lang", "en")
     ru = lang == "ru"
-    doc.add_heading(_t(front.get("title")) or L.label("title_todo", lang), level=0)
-    if ru:  # the title block of a Russian article is given in both languages
-        doc.add_paragraph(_t(front.get("title_en")) or "[уточнить: название статьи на английском]").runs[0].bold = True
-    if ctx.get("authors"):
-        doc.add_paragraph(_t(", ".join(a["name"] for a in ctx["authors"])))
+    _title_page(doc, ctx.get("inputs") or {"authors": ctx.get("authors") or []}, front, lang)
     if front.get("running_title"):
         doc.add_paragraph(_t(f"{L.label('running_title', lang)}: {front['running_title']}"))
     if front.get("keywords"):
@@ -139,6 +167,8 @@ def build_docx(ctx, draft, issues):
         if kind == "abstract_en" or (kind == "abstract" and "abstract_en" not in kinds):
             doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
 
+    if ru:  # Russian journals: author details on a separate page (RSCI)
+        _authors_page(doc, ctx.get("inputs") or {}, lang)
     doc.add_heading(L.label("references", lang), level=1)
     for e in r.bibliography:
         doc.add_paragraph(_t(e["text"]))
