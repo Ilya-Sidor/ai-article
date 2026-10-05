@@ -18,7 +18,8 @@ function viewDraftRender(root, p, m, reloadArg) {
   }
   const approved = m.plan && m.plan.status === "approved";
   const tabs = [["terms", "1. Терминология"], ["inputs", "2. Данные автора"], ["plan", "3. План"], ["assets", "4. Таблицы и рисунки"],
-    ["sections", "5. Разделы"], ["front", "6. Название и ключевые слова"], ["fix", "Что исправить"]];
+    ["sections", "5. Разделы"], ["front", "6. Название и ключевые слова"], ["review", "Рецензия и согласованность"],
+    ["fix", "Что исправить"]];
   if (!state.msTab) state.msTab = approved ? "sections" : "plan";
   const bar = el("div", { class: "tabs" }, tabs.map(([id, label]) => el("button", {
     class: "tab" + (state.msTab === id ? " active" : ""), text: label, disabled: id === "sections" && !approved,
@@ -33,7 +34,7 @@ function viewDraftRender(root, p, m, reloadArg) {
       ? el("button", { class: "badge danger", style: "border:none;cursor:pointer", text: `блокирующих замечаний: ${m.blocking} — показать и исправить`,
           onclick: () => { state.msTab = "fix"; viewDraftRender(root, p, m, reload); } })
       : el("span", { class: "badge ok", text: "блокирующих замечаний нет" }));
-  const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront,
+  const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront, review: msReview,
     fix: (pp) => msFix(pp, () => reload()) }[state.msTab](p, m, reload);
   root.replaceChildren(el("div", { class: "stack" },
     el("div", { class: "banner info small", text: (m.case_report ? "Case report по руководству CARE. Числа и признаки в тексте — ссылки на данные случая ({{…}}), их подставляет код." : "Числа в тексте — ссылки на результаты анализа ({{…}}), их подставляет код.") + " Цитаты — только проверенные фрагменты базы литературы. Каждый раздел: черновик → правки → принятие; все версии сохраняются." }),
@@ -68,6 +69,7 @@ function issueRow(p, i, after) {
     auto_terms: () => api(`/projects/${p.id}/manuscript/terms/auto`, { method: "POST" }),
     citation: (a) => api(`/projects/${p.id}/literature/citations/${a.id}`, { json: { decision: a.decision } }),
     verify: (a) => api(`/projects/${p.id}/literature/citations/${a.id}/verify`, { method: "POST" }),
+    remark: (a) => api(`/projects/${p.id}/manuscript/remarks/${a.id}`, { json: { status: a.status } }),
     consent: async () => {
       const cur = await api(`/projects/${p.id}/manuscript`);
       const inputs = { ...(cur.inputs || {}) };
@@ -135,6 +137,64 @@ function bsi(text) {
     if (t === undefined) return ch;
     return ch !== ch.toLowerCase() && t ? t[0].toUpperCase() + t.slice(1) : t;
   }).join("");
+}
+
+/* ---------- review and consistency (backend/app/manuscript/review.py) ---------- */
+
+const REC = { accept: ["ok", "принять"], minor_revision: ["exploratory", "незначительная доработка"],
+  major_revision: ["danger", "серьёзная доработка"], reject: ["danger", "отклонить"] };
+
+function remarkRow(p, x, reload, kind, headings) {
+  const quote = el("div", { class: "small muted mono issue-fragment", text: x.quote });
+  const revise = el("button", { class: "small primary", text: "Исправить с помощью ИИ", disabled: !state.meta.llm.available || !x.section || x.addressed });
+  revise.addEventListener("click", () => busy(revise, async () => {
+    reload(await api(`/projects/${p.id}/manuscript/sections/${x.section}/revise`, { json: { instruction: x.suggestion, selection: x.quote } }));
+    toast("Раздел переписан — проверьте новую версию");
+  }));
+  const mark = (status, text) => el("button", { class: "small", text, onclick: async (e) => busy(e.target, async () =>
+    reload(await api(`/projects/${p.id}/manuscript/remarks/${x.id}`, { json: { status } }))) });
+  const open = x.section ? el("button", { class: "small ghost", text: "Открыть раздел →", onclick: () => gotoFix(p, { step: "draft", tab: "sections", section: x.section }) }) : null;
+  const done = x.status !== "open" && x.status !== undefined;
+  return el("div", { class: "issue-row", style: done || x.addressed ? "opacity:.6" : "" },
+    el("div", { class: "row", style: "gap:8px;align-items:baseline" },
+      kind === "review" ? el("span", { class: "badge " + (x.severity === "major" ? "danger" : "exploratory"), text: x.severity === "major" ? "существенное" : "мелкое" }) : null,
+      el("strong", { class: "small", text: `${x.id} · ${x.heading || headings[x.section] || ""}` }),
+      x.addressed ? el("span", { class: "badge ok", text: "фрагмент изменён — вероятно, исправлено" }) : null,
+      x.status === "resolved" ? el("span", { class: "badge ok", text: "решено" }) : x.status === "dismissed" ? el("span", { class: "badge", text: "не согласен" }) : null),
+    el("div", { text: x.comment || x.problem }), quote,
+    x.suggestion ? el("div", { class: "small", text: "→ " + x.suggestion }) : null,
+    el("div", { class: "row", style: "gap:6px;margin-top:4px" }, revise,
+      done ? mark("open", "Вернуть") : mark("resolved", "Решено"), done ? null : mark("dismissed", "Не согласен"), open));
+}
+function msReview(p, m, reload) {
+  const headings = Object.fromEntries(m.sections.map((s) => [s.key, s.heading]));
+  const llmOn = state.meta.llm.available;
+  const cons = m.consistency;
+  const runCons = el("button", { class: cons ? "" : "primary", text: cons ? "Проверить заново" : "Проверить согласованность", disabled: !llmOn });
+  runCons.addEventListener("click", () => busy(runCons, async () => reload(await api(`/projects/${p.id}/manuscript/consistency`, { method: "POST" }))));
+  const strict = el("select", {}, [["mentor", "наставник (мягко)"], ["standard", "типичный рецензент журнала"], ["strict", "строгий «Рецензент 2»"]]
+    .map(([v, t]) => el("option", { value: v, text: t, selected: (m.review?.strictness || "standard") === v })));
+  const rev = m.review;
+  const runRev = el("button", { class: rev ? "" : "primary", text: rev ? "Рецензировать заново" : "Получить рецензию", disabled: !llmOn });
+  runRev.addEventListener("click", () => busy(runRev, async () => reload(await api(`/projects/${p.id}/manuscript/review`, { json: { strictness: strict.value } }))));
+  const consItems = (cons?.issues || []);
+  const revComments = (rev?.comments || []);
+  const openMajor = revComments.filter((c) => c.severity === "major" && c.status === "open" && !c.addressed).length;
+  return el("div", { class: "stack" },
+    el("div", { class: "card stack" }, el("h3", { text: "Проверка согласованности" }),
+      el("p", { class: "hint small", text: "ИИ сверяет резюме с результатами, выводы — с уровнем доказательности находок, текст — с таблицами, методы — с результатами. Каждое замечание указывает дословный фрагмент текста; замечания попадают и в «Что исправить»." }),
+      el("div", { class: "row" }, runCons, cons ? el("span", { class: "small muted", text: `${fmtDate(cons.at)} · ${cons.model}` }) : null),
+      cons ? (consItems.length ? el("div", {}, consItems.map((x) => remarkRow(p, x, reload, "consistency", headings))) : el("div", { class: "banner ok small", text: "Противоречий не найдено." })) : null),
+    el("div", { class: "card stack" }, el("h3", { text: "Рецензент журнала (ИИ)" }),
+      el("p", { class: "hint small", text: `Имитация рецензии ${m.template?.journal ? "журнала «" + m.template.journal + "»" : "целевого журнала"}: соответствие профилю и типу статьи, новизна (с учётом найденных похожих публикаций), методы, обоснованность выводов, ${m.case_report ? "полнота по CARE" : "уровни доказательности"}, ограничения. Перед подачей — чтобы закрыть очевидные вопросы заранее.` }),
+      el("div", { class: "row" }, el("label", { class: "row small" }, "Строгость: ", strict), runRev,
+        rev ? el("span", { class: "small muted", text: `${fmtDate(rev.at)} · ${rev.model}` }) : null),
+      rev ? el("div", { class: "stack" },
+        el("div", { class: "row" }, el("span", { class: "badge " + REC[rev.recommendation][0], text: "Рекомендация: " + REC[rev.recommendation][1] }),
+          openMajor ? el("span", { class: "small", text: `открытых существенных замечаний: ${openMajor}` }) : el("span", { class: "small", text: "существенные замечания закрыты" })),
+        el("p", { text: rev.summary }),
+        rev.strengths.length ? el("div", {}, el("strong", { class: "small", text: "Сильные стороны:" }), el("ul", { class: "small" }, rev.strengths.map((t) => el("li", { text: t })))) : null,
+        el("div", {}, revComments.map((x) => remarkRow(p, x, reload, "review", headings)))) : null));
 }
 
 /* ---------- 1. terminology ---------- */

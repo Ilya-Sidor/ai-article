@@ -15,7 +15,7 @@ from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
 from .manuscript import agent, assets, case as mcase, checks as mchecks, export, facts as mfacts, lang as mlang
-from .manuscript import fixes, statements, titlepage
+from .manuscript import fixes, review as mreview, statements, titlepage
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -173,6 +173,29 @@ def _check(pid, ctx, state, renderer):
                        "message": "нет английского перевода: " + "; ".join(what), "fragment": "",
                        "suggestion": "«1. Терминология» → «Перевести автоматически» или впишите перевод"})
     issues += titlepage.issues(state.get("inputs"), ctx["lang"])
+    # the abstract must not contain data that the body does not report
+    body = " ".join(s["source"] for s in sections if s["kind"] in ("results", "case_presentation", "methods", "other"))
+    ab = next((s for s in sections if s["kind"] == "abstract" and s["source"].strip()), None)
+    if ab and body.strip():
+        used = set(re.findall(r"\{\{\s*([A-Za-z0-9_.:-]+)\s*\}\}", body))
+        for fid in dict.fromkeys(re.findall(r"\{\{\s*([A-Za-z0-9_.:-]+)\s*\}\}", ab["source"])):
+            if fid in ctx["facts"] and fid not in used and fid != "n":
+                issues.append({"section": ab["key"], "heading": ab["heading"], "severity": "warning",
+                               "code": "abstract_unsupported", "fragment": "{{" + fid + "}}",
+                               "message": f"в резюме есть данные, которых нет в основном тексте: "
+                                          f"{ctx['facts'][fid]['desc']} = {ctx['facts'][fid]['value']}",
+                               "suggestion": "приведите это значение в результатах или уберите из резюме"})
+    # consistency remarks (AI) that still point at the text
+    parts = None
+    for k in (state.get("consistency") or {}).get("issues", []):
+        if k.get("status") in ("resolved", "dismissed"):
+            continue
+        parts = parts if parts is not None else mreview.manuscript_text(sections, renderer)
+        if mreview.still_there(k["quote"], parts):
+            sec = state["sections"].get(k["section"]) or {}
+            issues.append({"section": k["section"], "heading": sec.get("heading", ""), "severity": "warning",
+                           "code": "consistency", "fragment": k["quote"], "message": k["problem"],
+                           "suggestion": k["suggestion"], "remark": k["id"]})
     found = (read_json(store.dir(pid) / "literature" / "discovery.json", {}).get("cases") or {}).get("n", 0)
     if found:  # similar cases are published: a claim of being the first needs care
         for s in sections:
@@ -221,6 +244,20 @@ def manuscript_counts(pid):
 # Views
 # ---------------------------------------------------------------------------
 
+def _remarks_view(state, renderer):
+    """Review and consistency remarks; a remark whose quote left the text is shown as probably addressed."""
+    parts = mreview.manuscript_text([{"key": s["key"], "heading": s["heading"], "kind": s["kind"],
+                                      "source": ms.current_source(s)} for s in ms.ordered(state)], renderer)
+    out = {}
+    for key, items in (("review", "comments"), ("consistency", "issues")):
+        block = state.get(key)
+        if block:
+            block = dict(block, **{items: [dict(x, addressed=not mreview.still_there(x["quote"], parts))
+                                           for x in block.get(items, [])]})
+        out[key] = block
+    return out
+
+
 def _view(pid, ctx, state):
     renderer = _renderer(pid, ctx, state)
     issues, counts = _check(pid, ctx, state, renderer)
@@ -260,6 +297,7 @@ def _view(pid, ctx, state):
         "blocking": sum(1 for i in issues if i["severity"] == "blocking"),
         "template": ctx["template"], "has_analysis": bool(ctx["analysis"]),
         "n_accepted_findings": len(ctx["findings"]), "case_report": ctx["case_report"],
+        **_remarks_view(state, renderer),
         "n_cases": (ctx["analysis"].get("summary") or {}).get("n") if ctx["case_report"] else None,
     }
 
@@ -510,6 +548,61 @@ def generate_section(pid: str, key: str):
                     "queries": out.get("queries", [])})
     ms.save(store, pid, state)
     store.audit(pid, "agent", "manuscript.section_generated", {"section": key, "new_citations": len(report)})
+    return get_manuscript(pid)
+
+
+@router.post("/projects/{pid}/manuscript/consistency")
+def check_consistency(pid: str):
+    """FR: internal consistency (abstract vs body, conclusions vs evidence, text vs tables) — AI, quotes verified."""
+    ctx, state = context(pid)
+    renderer = _renderer(pid, ctx, state)
+    parts = mreview.manuscript_text([{"key": s["key"], "heading": s["heading"], "kind": s["kind"],
+                                      "source": ms.current_source(s)} for s in ms.ordered(state)
+                                     if s["kind"] not in ("statements",)], renderer)
+    if not parts:
+        raise HTTPException(400, "разделы ещё не написаны")
+    state["consistency"] = mreview.consistency(ctx["project"], parts, ctx)
+    ms.save(store, pid, state)
+    store.audit(pid, "agent", "manuscript.consistency", {"issues": len(state["consistency"]["issues"])})
+    return get_manuscript(pid)
+
+
+class ReviewIn(BaseModel):
+    strictness: str = Field(default="standard", pattern="^(mentor|standard|strict)$")
+
+
+@router.post("/projects/{pid}/manuscript/review")
+def simulate_review(pid: str, body: ReviewIn):
+    """A simulated reviewer of the target journal; every remark quotes the manuscript."""
+    ctx, state = context(pid)
+    renderer = _renderer(pid, ctx, state)
+    parts = mreview.manuscript_text([{"key": s["key"], "heading": s["heading"], "kind": s["kind"],
+                                      "source": ms.current_source(s)} for s in ms.ordered(state)
+                                     if s["kind"] not in ("statements", "abstract_en")], renderer)
+    if not parts:
+        raise HTTPException(400, "разделы ещё не написаны")
+    cases = (read_json(store.dir(pid) / "literature" / "discovery.json", {}).get("cases") or {}).get("n", 0)
+    state["review"] = mreview.review(ctx["project"], parts, ctx, body.strictness, cases)
+    ms.save(store, pid, state)
+    store.audit(pid, "agent", "manuscript.review", {"recommendation": state["review"]["recommendation"],
+                                                    "comments": len(state["review"]["comments"])})
+    return get_manuscript(pid)
+
+
+class RemarkIn(BaseModel):
+    status: str = Field(pattern="^(open|resolved|dismissed)$")
+
+
+@router.post("/projects/{pid}/manuscript/remarks/{rid}")
+def set_remark(pid: str, rid: str, body: RemarkIn):
+    """Mark a reviewer comment (R…) or a consistency remark (K…) as resolved / disagreed."""
+    state = ms.load(store, pid)
+    items = (state.get("review") or {}).get("comments", []) + (state.get("consistency") or {}).get("issues", [])
+    item = next((x for x in items if x["id"] == rid), None)
+    if item is None:
+        raise HTTPException(404, "замечание не найдено")
+    item["status"] = body.status
+    ms.save(store, pid, state)
     return get_manuscript(pid)
 
 

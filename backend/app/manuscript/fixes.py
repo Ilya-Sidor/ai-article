@@ -51,6 +51,11 @@ def annotate(issue, sections):
         actions.append({"type": "whitelist", "number": num, "label": "Число верное"})
     elif code in ("unknown_ref", "citation_bad") and issue.get("section") != "cover_letter" and frag:
         actions.append({"type": "remove", "find": frag, "label": "Удалить ссылку из текста"})
+    elif code in ("consistency", "abstract_unsupported") and goto:
+        actions.append({"type": "revise", "section": issue["section"], "label": "Исправить с помощью ИИ",
+                        "instruction": issue.get("suggestion") or "", "selection": frag[:300] if code == "consistency" else None})
+        if issue.get("remark"):
+            actions.append({"type": "remark", "id": issue["remark"], "status": "dismissed", "label": "Не согласен"})
     elif code in SECTION_ACTIONS and goto:
         actions.append({"type": "revise", "section": issue["section"], "label": "Исправить с помощью ИИ",
                         "instruction": SECTION_ACTIONS[code][1],
