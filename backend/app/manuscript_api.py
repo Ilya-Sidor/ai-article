@@ -3,7 +3,7 @@ import json
 import re
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -15,7 +15,7 @@ from .literature import agent as lit_agent, service as lit
 from .literature.citations import quote_in_text
 from .literature_api import _comparisons, _search_fn, store
 from .manuscript import agent, assets, case as mcase, checks as mchecks, export, facts as mfacts, lang as mlang
-from .manuscript import fixes, review as mreview, statements, titlepage
+from .manuscript import fixes, review as mreview, revision as mrevision, statements, titlepage
 from .manuscript import store as ms
 from .manuscript.render import Renderer, normalize_placeholders
 from .storage import now_iso, read_bytes, read_json
@@ -244,6 +244,14 @@ def manuscript_counts(pid):
 # Views
 # ---------------------------------------------------------------------------
 
+def _revision_view(state):
+    rounds = (state.get("revision") or {}).get("rounds") or []
+    if not rounds:
+        return None
+    r = rounds[-1]
+    return {"id": r["id"], "created_at": r["created_at"], "points": r["points"], "n_rounds": len(rounds)}
+
+
 def _remarks_view(state, renderer):
     """Review and consistency remarks; a remark whose quote left the text is shown as probably addressed."""
     parts = mreview.manuscript_text([{"key": s["key"], "heading": s["heading"], "kind": s["kind"],
@@ -298,6 +306,7 @@ def _view(pid, ctx, state):
         "template": ctx["template"], "has_analysis": bool(ctx["analysis"]),
         "n_accepted_findings": len(ctx["findings"]), "case_report": ctx["case_report"],
         **_remarks_view(state, renderer),
+        "revision": _revision_view(state),
         "n_cases": (ctx["analysis"].get("summary") or {}).get("n") if ctx["case_report"] else None,
     }
 
@@ -604,6 +613,144 @@ def set_remark(pid: str, rid: str, body: RemarkIn):
     item["status"] = body.status
     ms.save(store, pid, state)
     return get_manuscript(pid)
+
+
+# ---------------------------------------------------------------------------
+# Response to reviewers (revision rounds)
+# ---------------------------------------------------------------------------
+
+def _round(state):
+    rounds = (state.get("revision") or {}).get("rounds") or []
+    if not rounds:
+        raise HTTPException(400, "сначала вставьте письмо редакции с замечаниями рецензентов")
+    return rounds[-1]
+
+
+def _point(state, point_id):
+    p = next((x for x in _round(state)["points"] if x["id"] == point_id), None)
+    if p is None:
+        raise HTTPException(404, "замечание не найдено")
+    return p
+
+
+def _current_parts(pid, ctx, state):
+    renderer = _renderer(pid, ctx, state)
+    return mreview.manuscript_text([{"key": s["key"], "heading": s["heading"], "kind": s["kind"],
+                                     "source": ms.current_source(s)} for s in ms.ordered(state)], renderer)
+
+
+class LetterIn(BaseModel):
+    letter: str = Field(min_length=20, max_length=200_000)
+
+
+@router.post("/projects/{pid}/manuscript/revision")
+def start_revision(pid: str, body: LetterIn):
+    """A new round: the decision letter is split into points; the submitted text is kept as the baseline."""
+    ctx, state = context(pid)
+    points = mrevision.split(ctx["project"], body.letter)
+    if not points:
+        raise HTTPException(400, "в письме не найдено замечаний")
+    mrevision.new_round(state, points, body.letter)
+    ms.save(store, pid, state)
+    store.audit(pid, "author", "manuscript.revision_started", {"points": len(points)})
+    return get_manuscript(pid)
+
+
+@router.post("/projects/{pid}/manuscript/revision/letter-text")
+async def letter_text(pid: str, request: Request, file: Optional[UploadFile] = File(None), refs: str = Form("")):
+    """Text of a decision letter uploaded as .docx/.pdf/.txt (the author checks it before splitting)."""
+    from . import chunks, documents
+    got = await chunks.collect(request, [file] if file else [], refs, 20 * 1024 * 1024)
+    if not got:
+        raise HTTPException(400, "нет файла")
+    name, content = got[0]
+    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    try:
+        if ext in (".doc", ".rtf"):
+            content, ext = documents._convert_to_docx(ext, content), ".docx"
+        text = documents._docx(content)[0] if ext == ".docx" else documents._pdf(content)[0] if ext == ".pdf" \
+            else documents._decode(content)
+    except documents.DocumentError as exc:
+        raise HTTPException(400, str(exc))
+    return {"text": text.strip()}
+
+
+@router.post("/projects/{pid}/manuscript/revision/points/{point_id}/draft")
+def draft_response(pid: str, point_id: str):
+    ctx, state = context(pid)
+    p = _point(state, point_id)
+    parts = _current_parts(pid, ctx, state)
+    manuscript = "\n\n".join(f"## {h}\n{t}" for _, h, _, t in parts)
+    out = mrevision.draft(ctx["project"], p, manuscript, ctx["lang"])
+    p["response"] = out["response"]
+    p["change"] = None
+    if out.get("change_needed") and out.get("instruction"):
+        key = mreview._locate(out["quote"], out["section"], parts) or next(
+            (k for k, h, _, _ in parts if h.lower() == (out["section"] or "").lower()), None)
+        p["change"] = {"section": key, "heading": out["section"], "quote": out["quote"],
+                       "instruction": out["instruction"]}
+    p["status"] = "drafted"
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+@router.post("/projects/{pid}/manuscript/revision/points/{point_id}/apply")
+def apply_change(pid: str, point_id: str):
+    """The proposed change goes into the section as a new version (the response keeps the link)."""
+    state = ms.load(store, pid)
+    p = _point(state, point_id)
+    ch = p.get("change") or {}
+    if not ch.get("section") or not ch.get("instruction"):
+        raise HTTPException(400, "для этого замечания нет правки текста")
+    revise(pid, ch["section"], ReviseIn(instruction=ch["instruction"], selection=ch.get("quote") or None))
+    state = ms.load(store, pid)
+    p = _point(state, point_id)
+    sec = state["sections"][ch["section"]]
+    p["applied"] = (p.get("applied") or []) + [{"section": ch["section"], "version": len(sec["versions"]),
+                                                "at": now_iso()}]
+    p["status"] = "done"
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+class PointIn(BaseModel):
+    response: Optional[str] = Field(default=None, max_length=20_000)
+    status: Optional[str] = Field(default=None, pattern="^(open|drafted|done)$")
+    instruction: Optional[str] = Field(default=None, max_length=5_000)
+
+
+@router.put("/projects/{pid}/manuscript/revision/points/{point_id}")
+def edit_point(pid: str, point_id: str, body: PointIn):
+    state = ms.load(store, pid)
+    p = _point(state, point_id)
+    if body.response is not None:
+        p["response"] = body.response
+    if body.status is not None:
+        p["status"] = body.status
+    if body.instruction is not None and p.get("change"):
+        p["change"]["instruction"] = body.instruction
+    ms.save(store, pid, state)
+    return get_manuscript(pid)
+
+
+@router.get("/projects/{pid}/manuscript/revision/export.zip")
+def export_revision(pid: str):
+    import io
+    import zipfile
+    ctx, state = context(pid)
+    rnd = _round(state)
+    renderer = _renderer(pid, ctx, state)
+    front = state.get("front") or {}
+    sections = [(s["key"], s["heading"], s["kind"], ms.current_source(s)) for s in ms.ordered(state)]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("response_to_reviewers.docx", mrevision.response_docx(rnd, front.get("title"), ctx.get("journal"),
+                                                                         ctx["lang"]))
+        z.writestr("manuscript_changes_marked.docx", mrevision.marked_docx(sections, rnd["baseline"], renderer,
+                                                                           ctx["lang"]))
+    store.audit(pid, "author", "manuscript.revision_exported", {"round": rnd["id"]})
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="revision_{rnd["id"]}.zip"'})
 
 
 class ReplaceIn(BaseModel):

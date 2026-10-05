@@ -19,7 +19,7 @@ function viewDraftRender(root, p, m, reloadArg) {
   const approved = m.plan && m.plan.status === "approved";
   const tabs = [["terms", "1. Терминология"], ["inputs", "2. Данные автора"], ["plan", "3. План"], ["assets", "4. Таблицы и рисунки"],
     ["sections", "5. Разделы"], ["front", "6. Название и ключевые слова"], ["review", "Рецензия и согласованность"],
-    ["fix", "Что исправить"]];
+    ["fix", "Что исправить"], ["revision", "Ответ рецензентам"]];
   if (!state.msTab) state.msTab = approved ? "sections" : "plan";
   const bar = el("div", { class: "tabs" }, tabs.map(([id, label]) => el("button", {
     class: "tab" + (state.msTab === id ? " active" : ""), text: label, disabled: id === "sections" && !approved,
@@ -34,7 +34,7 @@ function viewDraftRender(root, p, m, reloadArg) {
       ? el("button", { class: "badge danger", style: "border:none;cursor:pointer", text: `блокирующих замечаний: ${m.blocking} — показать и исправить`,
           onclick: () => { state.msTab = "fix"; viewDraftRender(root, p, m, reload); } })
       : el("span", { class: "badge ok", text: "блокирующих замечаний нет" }));
-  const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront, review: msReview,
+  const body = { terms: msTerms, inputs: msInputs, plan: msPlan, assets: msAssets, sections: msSections, front: msFront, review: msReview, revision: msRevision,
     fix: (pp) => msFix(pp, () => reload()) }[state.msTab](p, m, reload);
   root.replaceChildren(el("div", { class: "stack" },
     el("div", { class: "banner info small", text: (m.case_report ? "Case report по руководству CARE. Числа и признаки в тексте — ссылки на данные случая ({{…}}), их подставляет код." : "Числа в тексте — ссылки на результаты анализа ({{…}}), их подставляет код.") + " Цитаты — только проверенные фрагменты базы литературы. Каждый раздел: черновик → правки → принятие; все версии сохраняются." }),
@@ -195,6 +195,74 @@ function msReview(p, m, reload) {
         el("p", { text: rev.summary }),
         rev.strengths.length ? el("div", {}, el("strong", { class: "small", text: "Сильные стороны:" }), el("ul", { class: "small" }, rev.strengths.map((t) => el("li", { text: t })))) : null,
         el("div", {}, revComments.map((x) => remarkRow(p, x, reload, "review", headings)))) : null));
+}
+
+/* ---------- response to reviewers (backend/app/manuscript/revision.py) ---------- */
+
+const POINT_KIND = { major: ["danger", "существенное"], minor: ["exploratory", "мелкое"], editorial: ["", "редакторское"], editor: ["accent", "редактор"] };
+
+function msRevision(p, m, reload) {
+  const llmOn = state.meta.llm.available;
+  const rv = m.revision;
+  const letter = el("textarea", { style: "min-height:160px", placeholder: "Вставьте письмо редакции с замечаниями рецензентов (или загрузите файл .docx/.pdf/.txt)" });
+  const fileIn = el("input", { type: "file", accept: ".docx,.doc,.pdf,.txt,.rtf", class: "hidden" });
+  const fileBtn = el("button", { class: "small", text: "Загрузить письмо из файла", onclick: () => fileIn.click() });
+  fileIn.addEventListener("change", () => busy(fileBtn, async () => {
+    const r = await sendFiles(`/projects/${p.id}/manuscript/revision/letter-text`, [fileIn.files[0]], { field: "file" });
+    letter.value = r.text; toast("Текст письма загружен — проверьте и нажмите «Разобрать замечания»");
+  }));
+  const parse = el("button", { class: "primary", text: rv ? "Новый раунд: разобрать замечания" : "Разобрать замечания", disabled: !llmOn });
+  parse.addEventListener("click", () => busy(parse, async () => {
+    if (letter.value.trim().length < 20) { letter.focus(); return; }
+    if (rv && !confirm("Начать новый раунд? Текущий текст станет исходным для отметки изменений.")) return;
+    reload(await api(`/projects/${p.id}/manuscript/revision`, { json: { letter: letter.value } }));
+  }));
+  const start = el("div", { class: "card stack" }, el("h3", { text: rv ? `Раунд ${rv.n_rounds} от ${fmtDate(rv.created_at)}` : "Ответ рецензентам" }),
+    el("p", { class: "hint small", text: "После получения решения редакции: ИИ разбивает письмо на отдельные замечания (каждое — дословно из письма), готовит ответ и правку текста по каждому; правка вносится в раздел новой версией. В конце — письмо «Ответ рецензентам» и рукопись с выделенными изменениями относительно поданной версии." }),
+    letter, el("div", { class: "row" }, fileBtn, fileIn, parse));
+  if (!rv) return el("div", { class: "stack" }, start);
+  const pts = rv.points;
+  const draftAll = el("button", { class: "small", text: "Подготовить ответы на все без ответа", disabled: !llmOn });
+  draftAll.addEventListener("click", () => busy(draftAll, async () => {
+    let last = null;
+    for (const x of pts.filter((x) => !x.response)) last = await api(`/projects/${p.id}/manuscript/revision/points/${x.id}/draft`, { method: "POST" });
+    if (last) reload(last);
+  }));
+  const exportBtn = el("a", { class: "btn primary", href: `/api/projects/${p.id}/manuscript/revision/export.zip`, text: "Скачать ответ рецензентам и рукопись с изменениями (.zip)" });
+  const items = pts.map((x) => {
+    const [cls, label] = POINT_KIND[x.kind] || POINT_KIND.minor;
+    const resp = el("textarea", { style: "min-height:90px" }, x.response || "");
+    const save = el("button", { class: "small", text: "Сохранить ответ" });
+    save.addEventListener("click", () => busy(save, async () => reload(await api(`/projects/${p.id}/manuscript/revision/points/${x.id}`, { method: "PUT", json: { response: resp.value } }))));
+    const draftBtn = el("button", { class: "small" + (x.response ? "" : " primary"), text: x.response ? "Переписать ответ (ИИ)" : "Подготовить ответ (ИИ)", disabled: !llmOn });
+    draftBtn.addEventListener("click", () => busy(draftBtn, async () => reload(await api(`/projects/${p.id}/manuscript/revision/points/${x.id}/draft`, { method: "POST" }))));
+    let change = null;
+    if (x.change) {
+      const instr = el("input", { value: x.change.instruction, style: "flex:1;min-width:260px" });
+      const apply = el("button", { class: "small primary", text: x.applied?.length ? "Внести правку ещё раз" : "Внести правку в текст (ИИ)", disabled: !llmOn || !x.change.section });
+      apply.addEventListener("click", () => busy(apply, async () => {
+        if (instr.value !== x.change.instruction) await api(`/projects/${p.id}/manuscript/revision/points/${x.id}`, { method: "PUT", json: { instruction: instr.value } });
+        reload(await api(`/projects/${p.id}/manuscript/revision/points/${x.id}/apply`, { method: "POST" }));
+        toast("Правка внесена — новая версия раздела");
+      }));
+      change = el("div", { class: "stack", style: "gap:4px" },
+        el("div", { class: "small" }, el("strong", { text: `Правка: раздел «${x.change.heading}»` }), x.applied?.length ? el("span", { class: "badge ok", style: "margin-left:6px", text: `внесена (v${x.applied.at(-1).version})` }) : null),
+        x.change.quote ? el("div", { class: "small muted mono issue-fragment", text: x.change.quote }) : null,
+        el("div", { class: "row", style: "gap:6px" }, instr, apply,
+          x.change.section ? el("button", { class: "small ghost", text: "Открыть раздел →", onclick: () => gotoFix(p, { step: "draft", tab: "sections", section: x.change.section }) }) : null));
+    }
+    return el("div", { class: "card stack", style: "gap:6px" },
+      el("div", { class: "row", style: "gap:8px;align-items:baseline" }, el("strong", { text: `${x.id} · ${x.reviewer}` }), el("span", { class: "badge " + cls, text: label }),
+        x.verbatim ? null : el("span", { class: "badge", title: "текст замечания не совпал с письмом дословно — сверьте", text: "не дословно" }),
+        x.status === "done" ? el("span", { class: "badge ok", text: "готово" }) : x.response ? el("span", { class: "badge accent", text: "есть ответ" }) : null),
+      el("div", { style: "font-style:italic", text: x.text }),
+      el("label", { class: "field" }, el("span", { text: m.lang === "ru" ? "Ответ" : "Response (English)" }), resp),
+      el("div", { class: "row", style: "gap:6px" }, draftBtn, save), change);
+  });
+  return el("div", { class: "stack" }, start,
+    el("div", { class: "card row between" }, el("span", { text: `Замечаний: ${pts.length} · с ответом: ${pts.filter((x) => x.response).length} · правок внесено: ${pts.filter((x) => x.applied?.length).length}` }),
+      el("div", { class: "row" }, draftAll, exportBtn)),
+    ...items);
 }
 
 /* ---------- 1. terminology ---------- */
