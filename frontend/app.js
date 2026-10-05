@@ -23,7 +23,7 @@ function el(tag, attrs, ...children) {
 }
 
 // Long operations run as background jobs (mirrors LONG_OPERATIONS in backend/app/jobs.py).
-const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/literature\/pdf$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
+const LONG_OPS = [/\/analysis\/run$/, /\/dataset\/extract$/, /\/literature\/pdf$/, /\/literature\/discover$/, /\/hypotheses$/, /\/findings\/[^/]+\/interpret$/, /\/literature\/identifiers$/,
   /\/literature\/sources\/[^/]+\/extract$/, /\/literature\/findings\/[^/]+\/compare$/, /\/literature\/ground$/,
   /\/literature\/retractions$/, /\/manuscript\/terms\/auto$/, /\/manuscript\/plan$/, /\/manuscript\/sections\/[^/]+\/generate$/,
   /\/manuscript\/sections\/[^/]+\/revise$/, /\/manuscript\/front\/generate$/, /\/cover\/generate$/, /\/cover\/revise$/,

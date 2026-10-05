@@ -17,7 +17,7 @@ async function viewLiterature(root, p) {
   const data = await api(`/projects/${p.id}/literature`);
   const tabs = [["sources", `Источники (${data.sources.length})`], ["matrix", "Матрица"],
     ["findings", "Находки × литература"], ["search", "Поиск по базе"], ["ground", "Цитирование текста"],
-    ["bib", "Список литературы"]];
+    ["bib", "Список литературы"], ["discover", "Похожие публикации и журналы"]];
   const bar = el("div", { class: "tabs" }, tabs.map(([id, label]) => el("button", {
     class: "tab" + (state.litTab === id ? " active" : ""), text: label,
     onclick: () => { state.litTab = id; viewLiterature(root, p); } })));
@@ -31,9 +31,77 @@ async function viewLiterature(root, p) {
     el("div", { class: "banner info small", text: "Цитата = проверяемый фрагмент: агент ссылается только на фрагменты этой базы; выдержка сверяется с текстом фрагмента кодом, затем цитату независимо проверяет другая модель. Метаданные — только из PubMed/Crossref." }),
     banner, el("div", {}, bar, body)));
   const render = { sources: litSources, matrix: litMatrix, findings: litFindings, search: litSearch, ground: litGround,
-    bib: litBibliography }[state.litTab];
+    bib: litBibliography, discover: litDiscover }[state.litTab];
   try { await render(body, p, data, () => viewLiterature(root, p)); }
   catch (e) { body.replaceChildren(el("div", { class: "card empty", text: e.message })); }
+}
+
+/* ---------- similar publications and journal suggestions (backend/app/literature/discovery.py) ---------- */
+
+async function litDiscover(body, p, data, reload) {
+  const last = await api(`/projects/${p.id}/literature/discover`);
+  const q = last.queries || {};
+  const topic = el("textarea", { style: "min-height:52px;font-family:var(--mono);font-size:12px" }, q.topic_query || "");
+  const cases = el("textarea", { style: "min-height:52px;font-family:var(--mono);font-size:12px" }, q.cases_query || "");
+  const run = el("button", { class: "primary", text: last.at ? "Искать заново (ИИ составит запросы)" : "Найти похожие публикации и журналы" });
+  run.addEventListener("click", () => busy(run, async () => { await api(`/projects/${p.id}/literature/discover`, { json: {} }); reload(); }));
+  const rerun = el("button", { text: "Искать по этим запросам", disabled: !last.at });
+  rerun.addEventListener("click", () => busy(rerun, async () => {
+    await api(`/projects/${p.id}/literature/discover`, { json: { queries: { topic_query: topic.value, cases_query: cases.value, keywords: q.keywords || [] } } });
+    reload();
+  }));
+  const pubmed = (pmid) => el("a", { href: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`, target: "_blank", rel: "noopener", text: "PubMed" });
+  const addBtn = (pmid) => {
+    const b = el("button", { class: "small", text: "В литературу" });
+    b.addEventListener("click", () => busy(b, async () => { await api(`/projects/${p.id}/literature/identifiers`, { json: { values: [pmid] } }); b.textContent = "✓ добавлено"; b.disabled = true; }));
+    return b;
+  };
+  const journalAction = (j) => {
+    if (j.profile) {
+      const b = el("button", { class: "small", text: "Выбрать журналом" });
+      b.addEventListener("click", () => busy(b, async () => {
+        const r = await api(`/projects/${p.id}/journal`, { method: "PUT", json: { journal_id: j.profile.id } });
+        toast(r.applied.message);
+      }));
+      return b;
+    }
+    const b = el("button", { class: "small ghost", text: "Добавить в базу" });
+    b.addEventListener("click", () => busy(b, async () => {
+      const r = await api("/journals", { json: { name: j.journal, publisher: "", guidelines_url: "" } });
+      toast(`«${r.name}» добавлен в базу журналов — заполните профиль по guidelines`);
+      reload();
+    }));
+    return b;
+  };
+  const journalRow = (j) => el("tr", {},
+    el("td", {}, j.journal, j.profile ? el("span", { class: "badge ok", style: "margin-left:6px", text: "в базе профилей" }) : null),
+    el("td", { text: `${j.n} (${j.share}%)` }),
+    el("td", { class: "small" }, j.examples.map((e) => el("div", {}, `${e.year} · ${e.title.slice(0, 90)} `, pubmed(e.pmid)))),
+    el("td", {}, journalAction(j)));
+  const journals = last.journals ? el("div", { class: "card stack" },
+    el("h3", { text: "Где публикуют похожие работы (последние 10 лет)" }),
+    el("p", { class: "hint small", text: `Найдено ${last.journals.n} статей по теме в PubMed; журналы — по числу публикаций. Это подсказка, а не рейтинг: учитывайте профиль и требования журнала.` }),
+    el("div", { class: "table-wrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, ["Журнал", "Статей", "Примеры", ""].map((h) => el("th", { text: h })))),
+      el("tbody", {}, last.journals.journals.map(journalRow))))) : null;
+  const casesCard = last.cases ? el("div", { class: "card stack" },
+    el("h3", { text: `Опубликованные похожие случаи (${last.cases.n})` }),
+    el("p", { class: "hint small", text: last.cases.n
+      ? "Прочитайте и процитируйте значимые из них в обсуждении; если похожие случаи есть, не пишите «впервые описан». Отметка «открытый доступ» — полный текст можно загрузить в базу бесплатно."
+      : "Похожих описаний не найдено по этому запросу. Попробуйте расширить запрос — прежде чем писать о новизне, убедитесь, что поиск достаточно широк." }),
+    last.cases.cases.map((c) => el("div", { class: "row", style: "border-bottom:1px solid var(--border);padding:6px 0;flex-wrap:nowrap;align-items:flex-start" },
+      el("div", { class: "grow small" }, el("div", { text: c.title }),
+        el("div", { class: "muted", text: `${c.authors || ""} · ${c.journal || ""} · ${c.year || ""}` }),
+        c.open_access ? el("span", { class: "badge ok", text: "открытый доступ" }) : null),
+      el("div", { class: "row", style: "gap:4px;flex-wrap:nowrap" }, c.pmid ? pubmed(c.pmid) : null, c.pmid ? addBtn(c.pmid) : null)))) : null;
+  body.replaceChildren(el("div", { class: "stack" },
+    el("div", { class: "card stack" }, el("h3", { text: "Похожие публикации и подбор журнала" }),
+      el("p", { class: "hint small", text: "ИИ составляет поисковые запросы по названию, ключевым сообщениям и (обезличенным) признакам случая; сам поиск идёт в PubMed и Europe PMC — все журналы и статьи реальные. Запросы можно поправить и повторить поиск без ИИ." }),
+      el("div", { class: "row" }, run, rerun),
+      last.at ? el("div", { class: "form-grid" },
+        el("label", { class: "field" }, el("span", { text: "Запрос по теме (для подбора журнала)" }), topic),
+        el("label", { class: "field" }, el("span", { text: "Запрос похожих случаев" }), cases)) : null),
+    journals, casesCard));
 }
 
 /* ---------- sources ---------- */

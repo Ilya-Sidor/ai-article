@@ -152,6 +152,11 @@ def _budgets(state):
     return out
 
 
+NOVELTY_CLAIM = re.compile(r"\b(first|1st) (ever )?(report|reported|description|described|case|documented)\b|"
+                           r"\bnever (been )?(reported|described)\b|впервые (описан\w*|в мире|в литературе|сообща\w*)|"
+                           r"ранее не (описан\w*|сообща\w*)", re.I)
+
+
 def _check(pid, ctx, state, renderer):
     sections = [{"key": s["key"], "kind": s["kind"], "heading": s["heading"], "source": ms.current_source(s),
                  "whitelist": s.get("number_whitelist")} for s in ms.ordered(state)]
@@ -168,6 +173,15 @@ def _check(pid, ctx, state, renderer):
                        "message": "нет английского перевода: " + "; ".join(what), "fragment": "",
                        "suggestion": "«1. Терминология» → «Перевести автоматически» или впишите перевод"})
     issues += titlepage.issues(state.get("inputs"), ctx["lang"])
+    found = (read_json(store.dir(pid) / "literature" / "discovery.json", {}).get("cases") or {}).get("n", 0)
+    if found:  # similar cases are published: a claim of being the first needs care
+        for s in sections:
+            m = NOVELTY_CLAIM.search(renderer.text(s["source"], s["kind"]) if s["source"] else "")
+            if m:
+                issues.append({"section": s["key"], "heading": s["heading"], "severity": "warning",
+                               "code": "novelty_claim", "fragment": m.group(0),
+                               "message": f"утверждение о новизне, хотя найдено похожих публикаций: {found}",
+                               "suggestion": "сравните со случаями на вкладке «Литература → Похожие публикации»"})
     if ctx["case_report"]:
         issues += mcase.care_issues(sections, renderer, state.get("front"), state.get("inputs"), ctx["template"])
     # citations used in the text must be decided and verified

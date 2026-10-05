@@ -1,4 +1,5 @@
 """REST API of the literature module (Module 3)."""
+import re
 from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -438,3 +439,57 @@ def put_settings(pid: str, body: SettingsIn):
     store.get(pid)
     lit.set_style(store, pid, body.style)
     return lit.settings(store, pid)
+
+
+# ---------------------------------------------------------------------------
+# Similar publications: journal suggestions and published similar cases
+# ---------------------------------------------------------------------------
+
+def _discovery_brief(pid):
+    """What the article is about, without patient details (no age, sex, dates)."""
+    from .manuscript_api import context
+    from .manuscript.store import current_source
+    ctx, state = context(pid)
+    project = ctx["project"]
+    front = state.get("front") or {}
+    lines = [f"Article type: {project.get('article_type')}", f"Project title: {project.get('title')}",
+             f"Focus: {project.get('focus') or ''}", f"Title: {front.get('title') or ''}",
+             f"Keywords: {', '.join(front.get('keywords') or [])}",
+             f"Key messages: {'; '.join(ctx.get('key_messages') or [])}"]
+    if ctx["case_report"]:
+        for v in (ctx["analysis"].get("case_report") or {}).get("variables", []):
+            if re.search(r"возраст|age|пол\b|sex|gender|дата|date|мес\.", v["name"], re.I):
+                continue
+            lines.append(f"{v['name']}: {', '.join(x for x in v['values'] if x)}")
+    else:
+        lines += [f"Finding: {f['title']}" for f in ctx["findings"]]
+    ab = (state.get("sections") or {}).get("abstract")
+    if ab and current_source(ab):
+        lines.append("Abstract draft: " + re.sub(r"\{\{[^}]+\}\}", "…", current_source(ab))[:3000])
+    return ctx["project"], "\n".join(lines)
+
+
+class DiscoverIn(BaseModel):
+    queries: Optional[dict] = None
+
+
+@router.post("/projects/{pid}/literature/discover")
+def discover_similar(pid: str, body: DiscoverIn):
+    from .journals import store as journals
+    from .literature import discovery
+    project, brief = _discovery_brief(pid)
+    q = body.queries if body.queries and (body.queries.get("topic_query") or "").strip() else None
+    try:
+        out = discovery.discover(project, brief, q, journals.list_profiles())
+    except md.MetadataError as exc:
+        raise HTTPException(502, f"PubMed недоступен: {exc}")
+    write_json(store.dir(pid) / "literature" / "discovery.json", out)
+    store.audit(pid, "author", "literature.discovery", {"journals": len(out["journals"]["journals"]),
+                                                        "cases": out["cases"]["n"]})
+    return out
+
+
+@router.get("/projects/{pid}/literature/discover")
+def discover_last(pid: str):
+    store.get(pid)
+    return read_json(store.dir(pid) / "literature" / "discovery.json", {})
