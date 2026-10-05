@@ -312,6 +312,26 @@ function msInputs(p, m, reload) {
     i.addEventListener("change", () => { obj[key] = opts.list ? i.value.split(",").map((x) => opts.num ? parseInt(x, 10) : x.trim()).filter((x) => opts.num ? x > 0 : x) : i.value.trim(); });
     return i;
   };
+  // my authors: a personal library reused across projects (backend/app/authors_api.py)
+  let library = [];
+  const normName = (s) => (s || "").trim().toLowerCase();
+  const toLibrary = (a) => ({ name: a.name || "", name_en: a.name_en || "", position: a.position || "", email: a.email || "",
+    orcid: a.orcid || "", roles: a.roles || [], affiliations: (a.affiliations || []).map((i) => inp.affiliations[i - 1]).filter(Boolean)
+      .map((x) => ({ name: x.name || "", name_en: x.name_en || "", address: x.address || "" })) });
+  const fromLibrary = (s) => {
+    const idx = (s.affiliations || []).map((aff) => {
+      let i = inp.affiliations.findIndex((x) => normName(x.name) === normName(aff.name));
+      if (i < 0) { inp.affiliations.push({ ...aff }); i = inp.affiliations.length - 1; }
+      return i + 1;
+    });
+    inp.authors.push({ name: s.name, name_en: s.name_en, position: s.position, email: s.email, orcid: s.orcid, roles: [...(s.roles || [])], affiliations: idx });
+  };
+  const saveToLibrary = async (authors) => {
+    for (const a of authors.filter((x) => (x.name || "").trim())) library = await api("/authors", { json: toLibrary(a) });
+    toast(authors.length > 1 ? "Авторы сохранены в «Мои авторы»" : "Автор сохранён в «Мои авторы»");
+    drawAuthors();
+  };
+  api("/authors").then((l) => { library = l; drawAuthors(); }).catch(() => {});
   const drawAuthors = () => {
     const affRows = inp.affiliations.map((a, i) => el("tr", {}, el("td", { class: "mono", text: String(i + 1) }),
       el("td", {}, cell(a, "name", "ФГБУ «…», Москва")), ruJ ? el("td", {}, cell(a, "name_en", "Official English name")) : null,
@@ -321,7 +341,8 @@ function msInputs(p, m, reload) {
       const corr = el("input", { type: "radio", name: "corr", checked: !!a.corresponding, onchange: () => { inp.authors.forEach((x) => { x.corresponding = x === a; }); } });
       const translit = ruJ ? el("button", { class: "small ghost", text: "латиницей", title: "транслитерация BSI", onclick: async () => {
         a.name_en = bsi(a.name || ""); drawAuthors(); } }) : null;
-      return el("tr", {}, el("td", {}, cell(a, "name", "Иванов Иван Иванович")),
+      const star = el("button", { class: "small ghost", text: "★", title: "сохранить в «Мои авторы» (со всеми данными и учреждениями)", onclick: () => saveToLibrary([a]) });
+      return el("tr", {}, el("td", {}, el("div", { class: "row", style: "gap:4px;flex-wrap:nowrap" }, cell(a, "name", "Иванов Иван Иванович"), star)),
         ruJ ? el("td", {}, el("div", { class: "row", style: "gap:4px;flex-wrap:nowrap" }, cell(a, "name_en", "Ivanov II"), translit)) : null,
         el("td", {}, cell(a, "position", "должность")), el("td", {}, cell(a, "affiliations", "1, 2", { list: true, num: true, w: "60px" })),
         el("td", {}, cell(a, "email", "e-mail")), el("td", {}, cell(a, "orcid", "0000-0000-0000-0000", { w: "150px" })),
@@ -336,7 +357,18 @@ function msInputs(p, m, reload) {
       el("h4", { text: "Авторы (в порядке на титульном листе)" }),
       el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, el("tr", {}, ["ФИО", ruJ ? "ФИО латиницей (BSI)" : null, "Должность", "Учр. №", "E-mail", "ORCID", "Роли CRediT", "Переписка", ""].filter((x) => x !== null).map((h) => el("th", { text: h })))),
         el("tbody", {}, autRows))),
-      el("div", {}, el("button", { class: "small", text: "+ автор", onclick: () => { inp.authors.push({ roles: [] }); drawAuthors(); } })),
+      el("div", { class: "row" },
+        el("button", { class: "small", text: "+ автор", onclick: () => { inp.authors.push({ roles: [] }); drawAuthors(); } }),
+        library.length ? el("select", { onchange: (e) => {
+          const s = library.find((x) => String(x.id) === e.target.value);
+          if (s) { fromLibrary(s); drawAuthors(); toast(`${s.name} добавлен(а) вместе с учреждениями — не забудьте «Сохранить»`); }
+        } }, el("option", { value: "", text: `+ из «Моих авторов» (${library.length})` }),
+          library.filter((s) => !inp.authors.some((a) => (s.orcid && a.orcid === s.orcid) || normName(a.name) === normName(s.name)))
+            .map((s) => el("option", { value: s.id, text: s.name + (s.orcid ? ` · ${s.orcid}` : "") + (s.position ? ` · ${s.position}` : "") }))) : null,
+        inp.authors.length ? el("button", { class: "small ghost", text: "Сохранить всех в «Мои авторы»", onclick: () => saveToLibrary(inp.authors) }) : null),
+      library.length ? el("details", {}, el("summary", { class: "small", text: `Мои авторы (${library.length}) — общая для всех ваших проектов библиотека` }),
+        el("ul", { class: "small" }, library.map((s) => el("li", {}, `${s.name}${s.orcid ? " · " + s.orcid : ""}${s.affiliations?.length ? " · " + s.affiliations.map((x) => x.name).join("; ") : ""} `,
+          el("button", { class: "small ghost", text: "удалить", onclick: async () => { library = await api(`/authors/${s.id}`, { method: "DELETE" }); drawAuthors(); } }))))) : null,
       el("p", { class: "hint small", text: ruJ ? "Журнал требует титульный блок на русском и английском, транслитерацию фамилий по BSI, ORCID подающего автора и сведения об авторах на отдельной странице — всё это собирается при экспорте автоматически." : "Номера учреждений ставятся надстрочными индексами у фамилий; автор для переписки указывается на титульном листе." }));
   };
   drawAuthors();

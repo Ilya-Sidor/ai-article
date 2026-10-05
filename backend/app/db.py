@@ -92,6 +92,14 @@ invites = Table(
     Column("used_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
 )
 
+saved_authors = Table(
+    "saved_authors", metadata,  # each user's library of co-authors (with their affiliations), sealed JSON
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("data", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 app_settings = Table(
     "app_settings", metadata,
     Column("key", String(100), primary_key=True),

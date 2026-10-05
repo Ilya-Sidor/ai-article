@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import admin_api, auth, chunks, cover_api, data_service, ethics_api, jobs, journals_api, literature_api, llm, manuscript_api
+from . import admin_api, auth, authors_api, chunks, cover_api, data_service, ethics_api, jobs, journals_api, literature_api, llm, manuscript_api
 from .storage import encrypt_existing
 from .analysis import engine, figures
 from .literature import metadata as lit_metadata
@@ -108,6 +108,7 @@ async def security_headers(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(admin_api.router)
+app.include_router(authors_api.router)
 
 
 @app.get("/api/health")
