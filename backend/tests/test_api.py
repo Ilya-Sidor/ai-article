@@ -112,3 +112,30 @@ def test_interface_is_versioned_and_revalidated(api):
     assert r.status_code == 200 and 'src="app.js?v=' in r.text and 'href="styles.css?v=' in r.text
     js = api.get("/app.js")
     assert js.headers["cache-control"] == "no-cache" and api.get("/api/meta").headers["cache-control"] == "no-store"
+
+
+def test_delete_case(api):
+    import io
+    from generate_sample import generate
+    pid = api.post("/api/projects", json={"title": "Del"}).json()["id"]
+    api.post(f"/api/projects/{pid}/uploads", files={"files": ("s.csv", generate().to_csv(index=False).encode())})
+    api.post(f"/api/projects/{pid}/anonymization/confirm")
+    r = api.delete(f"/api/projects/{pid}/dataset/cases/C-002").json()
+    ids = [row["case_id"] for row in r["rows"]]
+    assert "C-002" not in ids and len(ids) == 23 and r["project"]["n_cases"] == 23
+    assert "C-002" not in r["provenance"]
+    assert api.delete(f"/api/projects/{pid}/dataset/cases/C-002").status_code == 404
+    # a new upload never reuses a deleted (or existing) case id
+    api.post(f"/api/projects/{pid}/uploads", files={"files": ("t.csv", b"Age,Sex\n50,M\n")})
+    api.post(f"/api/projects/{pid}/anonymization/confirm")
+    ids = [row["case_id"] for row in api.get(f"/api/projects/{pid}/dataset").json()["rows"]]
+    assert len(ids) == len(set(ids)) and "C-025" in ids
+    assert any(a["action"] == "dataset.case_deleted" for a in api.get(f"/api/projects/{pid}/audit").json())
+
+
+def test_delete_last_case_returns_to_upload(api):
+    pid = api.post("/api/projects", json={"title": "One", "article_type": "case_report"}).json()["id"]
+    api.post(f"/api/projects/{pid}/uploads", files={"files": ("c.csv", "Возраст\n54\n".encode())})
+    api.post(f"/api/projects/{pid}/anonymization/confirm")
+    r = api.delete(f"/api/projects/{pid}/dataset/cases/C-001").json()
+    assert r["rows"] == [] and r["project"]["stage"] == "created" and r["project"]["anonymization"]["status"] == "none"

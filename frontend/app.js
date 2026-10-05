@@ -485,8 +485,8 @@ function casesTable(p, ds) {
     el("span", { class: "hint", text: "Двойной клик по ячейке — редактирование. Наведите на ID случая, чтобы увидеть источник (файл, строка)." }),
     el("a", { class: "btn small", href: `/api/projects/${p.id}/dataset/export.csv`, text: "Экспорт .csv" }));
   const table = el("table", { class: "cases" },
-    el("thead", {}, el("tr", {}, cols.map((c, i) => el("th", { class: i === 0 ? "sticky" : "", text: c })))),
-    el("tbody", {}, ds.rows.map((r) => el("tr", {}, cols.map((c, i) => {
+    el("thead", {}, el("tr", {}, el("th", {}), cols.map((c, i) => el("th", { class: i === 0 ? "sticky" : "", text: c })))),
+    el("tbody", {}, ds.rows.map((r) => el("tr", {}, el("td", {}, deleteCaseButton(p, r.case_id)), cols.map((c, i) => {
       if (i === 0) {
         const src = (ds.provenance[r.case_id] || []).map((s) => `${s.file}, строка ${s.row}`).join("; ");
         return el("td", { class: "sticky mono", title: "Источник: " + src, text: r[c] });
@@ -504,6 +504,20 @@ function casesTable(p, ds) {
     extractionCard(p, ds),
     ds.problems.length ? el("div", { class: "banner warn", text: `Проблемных значений: ${ds.problems.length}. Они исключаются из анализа, пока не будут исправлены.` }) : null,
     legend, el("div", { class: "table-wrap" }, table));
+}
+
+function deleteCaseButton(p, caseId) {
+  const b = el("button", { class: "small ghost", text: "✕", title: `удалить случай ${caseId}` });
+  b.addEventListener("click", () => {
+    if (!confirm(`Удалить случай ${caseId} из таблицы? Его данные будут удалены из проекта (действие необратимо). После удаления перезапустите анализ.`)) return;
+    busy(b, async () => {
+      const r = await api(`/projects/${p.id}/dataset/cases/${encodeURIComponent(caseId)}`, { method: "DELETE" });
+      state.project = r.project;
+      toast(r.rows.length ? `Случай ${caseId} удалён; перезапустите анализ, чтобы учесть изменения` : "Удалён последний случай — загрузите данные заново");
+      if (r.rows.length) route(); else location.hash = `#/p/${p.id}/data`;
+    });
+  });
+  return b;
 }
 
 function editCell(p, td, row, column) {

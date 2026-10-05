@@ -1,4 +1,5 @@
 """Reading uploaded tables and building the data dictionary (FR-1.1, FR-1.8, FR-1.11)."""
+import csv
 import io
 import json
 import re
@@ -26,7 +27,10 @@ def read_table(filename: str, content: bytes) -> pd.DataFrame:
         if text is None:
             raise UnsupportedFile("не удалось определить кодировку файла")
         sep = "\t" if ext == ".tsv" else None
-        return pd.read_csv(io.StringIO(text), sep=sep, engine="python", dtype=str, keep_default_na=False)
+        try:
+            return pd.read_csv(io.StringIO(text), sep=sep, engine="python", dtype=str, keep_default_na=False)
+        except csv.Error:  # one column: nothing to sniff a delimiter from
+            return pd.read_csv(io.StringIO(text), sep=",", dtype=str, keep_default_na=False)
     if ext in (".xlsx", ".xls"):
         return pd.read_excel(io.BytesIO(content), dtype=str, keep_default_na=False)
     if ext == ".json":

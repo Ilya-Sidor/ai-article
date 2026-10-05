@@ -113,7 +113,7 @@ def confirm(store: ProjectStore, pid: str) -> dict:
             link = None
         dataset = _merge(dataset, frame, link, rep["file"])
         missing_ids = dataset["case_id"].isna()
-        start = len(before)
+        start = max([int(c[2:]) for c in before if str(c)[2:].isdigit()] + [0])  # never reuse a deleted case's id
         new_ids = ["C-%03d" % (start + i + 1) for i in range(int(missing_ids.sum()))]
         dataset.loc[missing_ids, "case_id"] = new_ids
         if not link:
@@ -167,6 +167,34 @@ def edit_cell(store: ProjectStore, pid: str, case_id: str, column: str, value: s
     if extracted.get(case_id, {}).pop(column, None) is not None:  # checked by the author: no longer "from AI"
         write_json(store.dir(pid) / "extracted.json", extracted)
     store.audit(pid, "author", "dataset.cell_edited", {"case_id": case_id, "column": column, "old": old, "new": value})
+
+
+def delete_case(store: ProjectStore, pid: str, case_id: str) -> dict:
+    """Remove one case (patient) from the case table with its provenance and AI-extraction marks."""
+    df = store.dataset(pid)
+    if df is None or not (df["case_id"] == case_id).any():
+        raise DataError("случай не найден")
+    d = store.dir(pid)
+    df = df[df["case_id"] != case_id].reset_index(drop=True)
+    for name in ("provenance.json", "extracted.json"):
+        data = read_json(d / name, {})
+        if data.pop(case_id, None) is not None:
+            write_json(d / name, data)
+    conflicts = [c for c in read_json(d / "extraction_conflicts.json", []) if c.get("case_id") != case_id]
+    write_json(d / "extraction_conflicts.json", conflicts)
+    if df.empty:  # the last case: back to the upload step
+        for name in ("dataset.csv", "dictionary.json"):
+            if (d / name).exists():
+                (d / name).unlink()
+        p = store.update(pid, stage="created", n_cases=0, anonymization={"status": "none", "confirmed_at": None})
+    else:
+        store.save_frame(d / "dataset.csv", df)
+        old = {v["name"]: v for v in read_json(d / "dictionary.json", [])}
+        write_json(d / "dictionary.json", [old.get(v["name"], v) if old.get(v["name"], {}).get("edited") else v
+                                           for v in build_dictionary(df)])
+        p = store.update(pid, n_cases=int(len(df)))
+    store.audit(pid, "author", "dataset.case_deleted", {"case_id": case_id, "n_cases": int(len(df))})
+    return p
 
 
 ALLOWED_VTYPES = {"binary", "categorical", "ordinal", "quantitative", "identifier", "text"}
